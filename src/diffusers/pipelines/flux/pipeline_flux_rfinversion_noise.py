@@ -549,8 +549,11 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             image_latents = torch.cat([image_latents], dim=0)
 
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = self.scheduler.scale_noise(image_latents, timestep, noise)
+        import numpy as np
+        sigma = timestep[0]
+        latents = sigma * noise + (1.0 - sigma) * image_latents
         latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        np.save("reference_image_latent.npy", latents.detach().cpu().float().numpy())
         return latents, latent_image_ids
 
     @property
@@ -569,6 +572,35 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
     def interrupt(self):
         return self._interrupt
 
+    def enable_vae_slicing(self):
+        r"""
+        Enable sliced VAE decoding. When this option is enabled, the VAE will split the input tensor in slices to
+        compute decoding in several steps. This is useful to save some memory and allow larger batch sizes.
+        """
+        self.vae.enable_slicing()
+
+    def disable_vae_slicing(self):
+        r"""
+        Disable sliced VAE decoding. If `enable_vae_slicing` was previously enabled, this method will go back to
+        computing decoding in one step.
+        """
+        self.vae.disable_slicing()
+
+    def enable_vae_tiling(self):
+        r"""
+        Enable tiled VAE decoding. When this option is enabled, the VAE will split the input tensor into tiles to
+        compute decoding and encoding in several steps. This is useful for saving a large amount of memory and to allow
+        processing larger images.
+        """
+        self.vae.enable_tiling()
+
+    def disable_vae_tiling(self):
+        r"""
+        Disable tiled VAE decoding. If `enable_vae_tiling` was previously enabled, this method will go back to
+        computing decoding in one step.
+        """
+        self.vae.disable_tiling()
+
     @torch.no_grad()
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
@@ -582,7 +614,8 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         num_inference_steps: int = 28,
         timesteps: List[int] = None,
         guidance_scale: float = 7.0,
-        controller_guidance: float = 5.0,
+        controller_guidance: float = 0.5,
+        stop_step: int = 0,
         num_images_per_prompt: Optional[int] = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
@@ -728,26 +761,23 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             max_sequence_length=max_sequence_length,
             lora_scale=lora_scale,
         )
+        import math
+        def time_shift(mu: float, sigma: float, t: torch.Tensor):
+            return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
-        # 4.Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+
         image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
-        mu = calculate_shift(
-            image_seq_len,
-            self.scheduler.config.base_image_seq_len,
-            self.scheduler.config.max_image_seq_len,
-            self.scheduler.config.base_shift,
-            self.scheduler.config.max_shift,
-        )
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler,
-            num_inference_steps,
-            device,
-            timesteps,
-            sigmas,
-            mu=mu,
-        )
-        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
+        def get_lin_function(
+            x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15
+        ) -> Callable[[float], float]:
+            m = (y2 - y1) / (x2 - x1)
+            b = y1 - m * x1
+            return lambda x: m * x + b
+    
+        mu = get_lin_function()(image_seq_len)
+        timesteps = torch.linspace(0, 1, num_inference_steps+1)
+        timesteps = time_shift(mu, 1.0, timesteps).to("cuda", torch.bfloat16)
+        # 4.Prepare timesteps
 
         if num_inference_steps < 1:
             raise ValueError(
@@ -758,10 +788,9 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
         # 5. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
-
         latents, latent_image_ids = self.prepare_latents(
             init_image,
-            latent_timestep,
+            timesteps,
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -784,18 +813,17 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
         # fix noise sample y1
         y1 = randn_tensor(latents.shape, generator=generator, device=device, dtype=latents.dtype)
-
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(num_inference_steps - stop_step):
                 if self.interrupt:
                     continue
-
+                t = torch.tensor([timesteps[i]], device=latents.device, dtype=latents.dtype)
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 noise_pred = self.transformer(
                     hidden_states=latents,
-                    timestep=timestep / 1000,
+                    timestep=timestep,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -806,30 +834,13 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                 )[0]
 
                 unconditional_vector_field = noise_pred
-                conditional_vector_field = (y1-unconditional_vector_field)/(1-(timestep / 1000))
+                conditional_vector_field = (y1-latents)/(1-timestep)
                 controlled_vector_field = unconditional_vector_field + controller_guidance * (conditional_vector_field - unconditional_vector_field)
 
-                # compute the previous noisy sample x_t -> x_t-1
-                latents_dtype = latents.dtype
-                latents = self.scheduler.step(controlled_vector_field, t, latents, return_dict=False)[0]
-
-                if latents.dtype != latents_dtype:
-                    if torch.backends.mps.is_available():
-                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
-                        latents = latents.to(latents_dtype)
-
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
+                # Get the corresponding sigma values
+                sigma = timesteps[i]
+                sigma_next = timesteps[i+1]
+                latents = latents + (sigma_next - sigma) * controlled_vector_field
 
                 if XLA_AVAILABLE:
                     xm.mark_step()
