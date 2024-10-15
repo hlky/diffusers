@@ -550,8 +550,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
         import numpy as np
-        sigma = timestep[0]
-        latents = sigma * noise + (1.0 - sigma) * image_latents
+        latents = self.scheduler.scale_noise(image_latents, timestep, noise)
         latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
         np.save("reference_image_latent.npy", latents.detach().cpu().float().numpy())
         return latents, latent_image_ids
@@ -761,23 +760,26 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             max_sequence_length=max_sequence_length,
             lora_scale=lora_scale,
         )
-        import math
-        def time_shift(mu: float, sigma: float, t: torch.Tensor):
-            return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
-
-        image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
-        def get_lin_function(
-            x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15
-        ) -> Callable[[float], float]:
-            m = (y2 - y1) / (x2 - x1)
-            b = y1 - m * x1
-            return lambda x: m * x + b
-    
-        mu = get_lin_function()(image_seq_len)
-        timesteps = torch.linspace(0, 1, num_inference_steps+1)
-        timesteps = time_shift(mu, 1.0, timesteps).to("cuda", torch.bfloat16)
         # 4.Prepare timesteps
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+        image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
+        mu = calculate_shift(
+            image_seq_len,
+            self.scheduler.config.base_image_seq_len,
+            self.scheduler.config.max_image_seq_len,
+            self.scheduler.config.base_shift,
+            self.scheduler.config.max_shift,
+        )
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            device,
+            timesteps,
+            sigmas,
+            mu=mu,
+        )
+        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
 
         if num_inference_steps < 1:
             raise ValueError(
@@ -788,9 +790,10 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
         # 5. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
+
         latents, latent_image_ids = self.prepare_latents(
             init_image,
-            timesteps,
+            latent_timestep,
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -815,15 +818,13 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         y1 = randn_tensor(latents.shape, generator=generator, device=device, dtype=latents.dtype)
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i in range(num_inference_steps - stop_step):
+            for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                t = torch.tensor([timesteps[i]], device=latents.device, dtype=latents.dtype)
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 noise_pred = self.transformer(
                     hidden_states=latents,
-                    timestep=timestep,
+                    timestep=timestep / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -837,10 +838,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                 conditional_vector_field = (y1-latents)/(1-timestep)
                 controlled_vector_field = unconditional_vector_field + controller_guidance * (conditional_vector_field - unconditional_vector_field)
 
-                # Get the corresponding sigma values
-                sigma = timesteps[i]
-                sigma_next = timesteps[i+1]
-                latents = latents + (sigma_next - sigma) * controlled_vector_field
+                latents = self.scheduler.step(controlled_vector_field, t, latents, return_dict=False)[0]
 
                 if XLA_AVAILABLE:
                     xm.mark_step()

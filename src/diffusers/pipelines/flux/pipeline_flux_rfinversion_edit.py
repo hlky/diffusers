@@ -681,7 +681,27 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
             generator,
             latents,
         )
+
+        # 5. Prepare timesteps
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
         image_seq_len = latents.shape[1]
+        mu = calculate_shift(
+            image_seq_len,
+            self.scheduler.config.base_image_seq_len,
+            self.scheduler.config.max_image_seq_len,
+            self.scheduler.config.base_shift,
+            self.scheduler.config.max_shift,
+        )
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            device,
+            timesteps,
+            sigmas,
+            mu=mu,
+        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        self._num_timesteps = len(timesteps)
 
         # handle guidance
         if self.transformer.config.guidance_embeds:
@@ -690,35 +710,18 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         else:
             guidance = None
 
-        import math
-        def time_shift(mu: float, sigma: float, t: torch.Tensor):
-            return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
-
-
-        def get_lin_function(
-            x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15
-        ) -> Callable[[float], float]:
-            m = (y2 - y1) / (x2 - x1)
-            b = y1 - m * x1
-            return lambda x: m * x + b
-    
-        mu = get_lin_function()(image_seq_len)
-        timesteps = torch.linspace(0, 1, num_inference_steps+1)
-        timesteps = time_shift(mu, 1.0, timesteps).to(latents.device, latents.dtype)
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i in range(num_inference_steps):
+            for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-                t = torch.tensor([timesteps[i]], device=latents.device, dtype=latents.dtype)
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 timestep = 1-timestep
 
                 control_guidance = controller_guidance if i < stop_step else 0.0
                 unconditional_vector_field = -self.transformer(
                     hidden_states=latents,
-                    timestep=timestep,
+                    timestep=timestep / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -731,10 +734,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
                 conditional_vector_field = (reference_image - latents) / timestep
                 controlled_vector_field = unconditional_vector_field + control_guidance * (conditional_vector_field - unconditional_vector_field)
 
-                sigma = timesteps[i]
-                sigma_next = timesteps[i+1]
-                latents = latents + (sigma_next - sigma) * controlled_vector_field
-
+                latents = self.scheduler.step(controlled_vector_field, t, latents, return_dict=False)[0]
 
         if output_type == "latent":
             image = latents
