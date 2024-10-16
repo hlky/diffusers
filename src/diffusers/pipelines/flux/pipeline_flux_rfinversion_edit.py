@@ -19,8 +19,8 @@ import numpy as np
 import torch
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-from ...image_processor import VaeImageProcessor
-from ...loaders import FluxLoraLoaderMixin, FromSingleFileMixin
+from ...image_processor import PipelineImageInput, VaeImageProcessor
+from ...loaders import FluxLoraLoaderMixin
 from ...models.autoencoders import AutoencoderKL
 from ...models.transformers import FluxTransformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
@@ -51,19 +51,30 @@ EXAMPLE_DOC_STRING = """
     Examples:
         ```py
         >>> import torch
-        >>> from diffusers import FluxPipeline
 
-        >>> pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16)
-        >>> pipe.to("cuda")
-        >>> prompt = "A cat holding a sign that says hello world"
-        >>> # Depending on the variant being used, the pipeline call will slightly vary.
-        >>> # Refer to the pipeline documentation for more details.
-        >>> image = pipe(prompt, num_inference_steps=4, guidance_scale=0.0).images[0]
-        >>> image.save("flux.png")
+        >>> from diffusers.pipelines.flux.pipeline_flux_rfinversion_edit import FluxRFInversionEditPipeline
+        >>> from diffusers.utils import load_image
+
+        >>> device = "cuda"
+        >>> pipe = FluxRFInversionEditPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)
+        >>> pipe.enable_model_cpu_offload()
+        >>> pipe.enable_vae_tiling()
+
+        >>> url = "https://i.pinimg.com/originals/c0/01/34/c001340727e5a7e4d8f2fcb951353f3d.jpg"
+        >>> init_image = load_image(url).resize((1024, 1024))
+
+        >>> prompt = "origami cat"
+        >>> structured_noise = ... # from FluxRFInversionNoisePipeline
+
+        >>> image = pipe(
+        ...     prompt=prompt, num_inference_steps=28, guidance_scale=3.5,
+        ...     controller_guidance=0.9, stopping_time=6, reference_image=init_image, latents=structured_noise,
+        ... ).images[0]
         ```
 """
 
 
+# Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
 def calculate_shift(
     image_seq_len,
     base_seq_len: int = 256,
@@ -75,6 +86,20 @@ def calculate_shift(
     b = base_shift - m * base_seq_len
     mu = image_seq_len * m + b
     return mu
+
+
+# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
+def retrieve_latents(
+    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
+):
+    if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
+        return encoder_output.latent_dist.sample(generator)
+    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
+        return encoder_output.latent_dist.mode()
+    elif hasattr(encoder_output, "latents"):
+        return encoder_output.latents
+    else:
+        raise AttributeError("Could not access latents of provided encoder_output")
 
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
@@ -137,7 +162,7 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFileMixin):
+class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
     r"""
     The Flux pipeline for [RFInversion](https://arxiv.org/pdf/2410.10792) Edit (Algorithm 2).
 
@@ -198,6 +223,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         )
         self.default_sample_size = 64
 
+    # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._get_t5_prompt_embeds
     def _get_t5_prompt_embeds(
         self,
         prompt: Union[str, List[str]] = None,
@@ -244,6 +270,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
 
         return prompt_embeds
 
+    # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._get_clip_prompt_embeds
     def _get_clip_prompt_embeds(
         self,
         prompt: Union[str, List[str]],
@@ -285,6 +312,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
 
         return prompt_embeds
 
+    # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline.encode_prompt
     def encode_prompt(
         self,
         prompt: Union[str, List[str]],
@@ -364,10 +392,38 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
 
         return prompt_embeds, pooled_prompt_embeds, text_ids
 
+    # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_inpaint.StableDiffusion3InpaintPipeline._encode_vae_image
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+        if isinstance(generator, list):
+            image_latents = [
+                retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
+                for i in range(image.shape[0])
+            ]
+            image_latents = torch.cat(image_latents, dim=0)
+        else:
+            image_latents = retrieve_latents(self.vae.encode(image), generator=generator)
+
+        image_latents = (image_latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+
+        return image_latents
+
+    # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps
+    def get_timesteps(self, num_inference_steps, strength, device):
+        # get the original timestep using init_timestep
+        init_timestep = min(num_inference_steps * strength, num_inference_steps)
+
+        t_start = int(max(num_inference_steps - init_timestep, 0))
+        timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
+        if hasattr(self.scheduler, "set_begin_index"):
+            self.scheduler.set_begin_index(t_start * self.scheduler.order)
+
+        return timesteps, num_inference_steps - t_start
+
     def check_inputs(
         self,
         prompt,
         prompt_2,
+        strength,
         height,
         width,
         prompt_embeds=None,
@@ -375,6 +431,9 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         callback_on_step_end_tensor_inputs=None,
         max_sequence_length=None,
     ):
+        if strength < 0 or strength > 1:
+            raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
+
         if height % 8 != 0 or width % 8 != 0:
             raise ValueError(f"`height` and `width` have to be divisible by 8 but are {height} and {width}.")
 
@@ -413,6 +472,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
             raise ValueError(f"`max_sequence_length` cannot be greater than 512 but is {max_sequence_length}")
 
     @staticmethod
+    # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._prepare_latent_image_ids
     def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
         latent_image_ids = torch.zeros(height // 2, width // 2, 3)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height // 2)[:, None]
@@ -427,6 +487,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         return latent_image_ids.to(device=device, dtype=dtype)
 
     @staticmethod
+    # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._pack_latents
     def _pack_latents(latents, batch_size, num_channels_latents, height, width):
         latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
         latents = latents.permute(0, 2, 4, 1, 3, 5)
@@ -435,6 +496,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         return latents
 
     @staticmethod
+    # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._unpack_latents
     def _unpack_latents(latents, height, width, vae_scale_factor):
         batch_size, num_patches, channels = latents.shape
 
@@ -479,6 +541,8 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
 
     def prepare_latents(
         self,
+        image,
+        timestep,
         batch_size,
         num_channels_latents,
         height,
@@ -488,26 +552,37 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         generator,
         latents=None,
     ):
-        height = 2 * (int(height) // self.vae_scale_factor)
-        width = 2 * (int(width) // self.vae_scale_factor)
-
-        shape = (batch_size, num_channels_latents, height, width)
-
-        if latents is not None:
-            latent_image_ids = self._prepare_latent_image_ids(batch_size, height, width, device, dtype)
-            return latents.to(device=device, dtype=dtype), latent_image_ids
-
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
                 f" size of {batch_size}. Make sure the batch size matches the length of the generators."
             )
 
-        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        height = 2 * (int(height) // self.vae_scale_factor)
+        width = 2 * (int(width) // self.vae_scale_factor)
 
+        shape = (batch_size, num_channels_latents, height, width)
         latent_image_ids = self._prepare_latent_image_ids(batch_size, height, width, device, dtype)
 
+        if latents is not None:
+            return latents.to(device=device, dtype=dtype), latent_image_ids
+
+        image = image.to(device=device, dtype=dtype)
+        image_latents = self._encode_vae_image(image=image, generator=generator)
+        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+            # expand init_latents for batch_size
+            additional_image_per_prompt = batch_size // image_latents.shape[0]
+            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+            raise ValueError(
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+            )
+        else:
+            image_latents = torch.cat([image_latents], dim=0)
+
+        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        latents = self.scheduler.scale_noise(image_latents, timestep, noise)
+        latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
         return latents, latent_image_ids
 
     @property
@@ -532,14 +607,15 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         self,
         prompt: Union[str, List[str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
+        reference_image: PipelineImageInput = None,
         height: Optional[int] = None,
         width: Optional[int] = None,
+        strength: float = 0.6,
         num_inference_steps: int = 28,
         timesteps: List[int] = None,
-        guidance_scale: float = 3.5,
-        controller_guidance: float = 5.0,
-        reference_image: Optional[torch.FloatTensor] = None,
-        stop_step: int = 28,
+        guidance_scale: float = 7.0,
+        controller_guidance: float = 0.9,
+        stopping_time: int = 6,
         num_images_per_prompt: Optional[int] = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
@@ -562,10 +638,22 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
             prompt_2 (`str` or `List[str]`, *optional*):
                 The prompt or prompts to be sent to `tokenizer_2` and `text_encoder_2`. If not defined, `prompt` is
                 will be used instead
+            image (`torch.Tensor`, `PIL.Image.Image`, `np.ndarray`, `List[torch.Tensor]`, `List[PIL.Image.Image]`, or `List[np.ndarray]`):
+                `Image`, numpy array or tensor representing an image batch to be used as the starting point. For both
+                numpy array and pytorch tensor, the expected value range is between `[0, 1]` If it's a tensor or a list
+                or tensors, the expected shape should be `(B, C, H, W)` or `(C, H, W)`. If it is a numpy array or a
+                list of arrays, the expected shape should be `(B, H, W, C)` or `(H, W, C)` It can also accept image
+                latents as `image`, but if passing latents directly it is not encoded again.
             height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The height in pixels of the generated image. This is set to 1024 by default for the best results.
             width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
                 The width in pixels of the generated image. This is set to 1024 by default for the best results.
+            strength (`float`, *optional*, defaults to 1.0):
+                Indicates extent to transform the reference `image`. Must be between 0 and 1. `image` is used as a
+                starting point and more noise is added the higher the `strength`. The number of denoising steps depends
+                on the amount of noise initially added. When `strength` is 1, added noise is maximum and the denoising
+                process runs for the full number of iterations specified in `num_inference_steps`. A value of 1
+                essentially ignores `image`.
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
@@ -629,6 +717,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         self.check_inputs(
             prompt,
             prompt_2,
+            strength,
             height,
             width,
             prompt_embeds=prompt_embeds,
@@ -641,7 +730,11 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
         self._joint_attention_kwargs = joint_attention_kwargs
         self._interrupt = False
 
-        # 2. Define call parameters
+        # 2. Preprocess image
+        reference_image = self.image_processor.preprocess(image, height=height, width=width)
+        reference_image = reference_image.to(dtype=torch.float32)
+
+        # 3. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
         elif prompt is not None and isinstance(prompt, list):
@@ -669,22 +762,10 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
             lora_scale=lora_scale,
         )
 
-        # 4. Prepare latent variables
-        num_channels_latents = self.transformer.config.in_channels // 4
-        latents, latent_image_ids = self.prepare_latents(
-            batch_size * num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds.dtype,
-            device,
-            generator,
-            latents,
-        )
-
-        # 5. Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-        image_seq_len = latents.shape[1]
+        # 4.Prepare timesteps
+        # Flux noise scheduler $\sigma : [0, 1] \to \mathbb{R}$
+        sigmas = np.linspace(0.0, 1.0, num_inference_steps)
+        image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
         mu = calculate_shift(
             image_seq_len,
             self.scheduler.config.base_image_seq_len,
@@ -700,6 +781,46 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
             sigmas,
             mu=mu,
         )
+        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
+
+        if num_inference_steps < 1:
+            raise ValueError(
+                f"After adjusting the num_inference_steps by strength parameter: {strength}, the number of pipeline"
+                f"steps is {num_inference_steps} which is < 1 and not appropriate for this pipeline."
+            )
+        latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
+
+        # 5. Prepare latent variables
+        num_channels_latents = self.transformer.config.in_channels // 4
+
+        # reference image $y_0$
+        reference_image, _ = self.prepare_latents(
+            reference_image,
+            latent_timestep,
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            generator,
+            None,
+        )
+
+        # Initialize $X_0 = y_1$
+        latents, latent_image_ids = self.prepare_latents(
+            None,
+            latent_timestep,
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            generator,
+            latents,
+        )
+
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
@@ -715,13 +836,14 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
+                timestep = timestep / 1000
+                # Unconditional vector field: $v_{t_i}(X_{t_i}) = -u(X_{t_i}, 1 - t_i, \Phi(\text{prompt}); \phi)$
                 timestep = 1-timestep
-
-                control_guidance = controller_guidance if i < stop_step else 0.0
                 unconditional_vector_field = -self.transformer(
                     hidden_states=latents,
-                    timestep=timestep / 1000,
+                    timestep=timestep,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -731,10 +853,38 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSi
                     return_dict=False,
                 )[0]
 
+                # consider a time-varying controller guidance schedule ηt = η ∀t ≤ τ and 0 otherwise
+                control_guidance = controller_guidance if i < stopping_time else 0.0
+                # Conditional vector field: $v_{t_i}(X_{t_i} | y_0) = \frac{y_0 - X_{t_i}}{1 - t_i}$
                 conditional_vector_field = (reference_image - latents) / timestep
+                # Controlled vector field: $\hat{v}_{t_i}(X_{t_i}) = v_{t_i}(X_{t_i}) + \eta \left( v_{t_i}(X_{t_i} | y_0) - v_{t_i}(X_{t_i}) \right)$
                 controlled_vector_field = unconditional_vector_field + control_guidance * (conditional_vector_field - unconditional_vector_field)
 
+                # compute the previous noisy sample x_t -> x_t-1
+                latents_dtype = latents.dtype
+                # Next state: $X_{t_{i+1}} = X_{t_i} + \hat{v}_{t_i}(X_{t_i}) \cdot (\sigma(t_{i+1}) - \sigma(t_i))$
                 latents = self.scheduler.step(controlled_vector_field, t, latents, return_dict=False)[0]
+
+                if latents.dtype != latents_dtype:
+                    if torch.backends.mps.is_available():
+                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                        latents = latents.to(latents_dtype)
+
+                if callback_on_step_end is not None:
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
+                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                    latents = callback_outputs.pop("latents", latents)
+                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+
+                if XLA_AVAILABLE:
+                    xm.mark_step()
 
         if output_type == "latent":
             image = latents

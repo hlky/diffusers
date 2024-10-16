@@ -52,21 +52,23 @@ EXAMPLE_DOC_STRING = """
         ```py
         >>> import torch
 
-        >>> from diffusers import FluxImg2ImgPipeline
+        >>> from diffusers.pipelines.flux.pipeline_flux_rfinversion_noise import FluxRFInversionNoisePipeline
         >>> from diffusers.utils import load_image
 
         >>> device = "cuda"
-        >>> pipe = FluxImg2ImgPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16)
-        >>> pipe = pipe.to(device)
+        >>> pipe = FluxRFInversionNoisePipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)
+        >>> pipe.enable_model_cpu_offload()
+        >>> pipe.enable_vae_tiling()
 
-        >>> url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+        >>> url = "https://i.pinimg.com/originals/c0/01/34/c001340727e5a7e4d8f2fcb951353f3d.jpg"
         >>> init_image = load_image(url).resize((1024, 1024))
 
-        >>> prompt = "cat wizard, gandalf, lord of the rings, detailed, fantasy, cute, adorable, Pixar, Disney, 8k"
+        >>> prompt = ""
 
-        >>> images = pipe(
-        ...     prompt=prompt, image=init_image, num_inference_steps=4, strength=0.95, guidance_scale=0.0
-        ... ).images[0]
+        >>> structured_noise = pipe(
+        ...     prompt=prompt, image=init_image, num_inference_steps=28, strength=1.0, guidance_scale=3.5,
+        ...     controller_guidance=0.5, output_type="latent", starting_time=0,
+        ... ).images
         ```
 """
 
@@ -549,10 +551,8 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             image_latents = torch.cat([image_latents], dim=0)
 
         noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        import numpy as np
         latents = self.scheduler.scale_noise(image_latents, timestep, noise)
         latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
-        np.save("reference_image_latent.npy", latents.detach().cpu().float().numpy())
         return latents, latent_image_ids
 
     @property
@@ -614,7 +614,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         timesteps: List[int] = None,
         guidance_scale: float = 7.0,
         controller_guidance: float = 0.5,
-        stop_step: int = 0,
+        starting_time: int = 0,
         num_images_per_prompt: Optional[int] = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.FloatTensor] = None,
@@ -730,6 +730,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         self._interrupt = False
 
         # 2. Preprocess image
+        # Initialize $Y_0 = y_0$
         init_image = self.image_processor.preprocess(image, height=height, width=width)
         init_image = init_image.to(dtype=torch.float32)
 
@@ -762,7 +763,8 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         )
 
         # 4.Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+        # Flux noise scheduler $\sigma : [0, 1] \to \mathbb{R}$
+        sigmas = np.linspace(0.0, 1.0, num_inference_steps)
         image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
         mu = calculate_shift(
             image_seq_len,
@@ -814,17 +816,22 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         else:
             guidance = None
 
-        # fix noise sample y1
+        # Fix a noise sample $y_1$
         y1 = randn_tensor(latents.shape, generator=generator, device=device, dtype=latents.dtype)
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                # starting time s ∈ [0, 1] is defined as the time at which our controlled reverse ODE (15) is initialized.
+                # The initial state Xs = y1−s is obtained by integrating the controlled forward ODE (8) from 0 → 1 − s.
+                if i > self._num_timesteps - starting_time:
+                    continue
                 if self.interrupt:
                     continue
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
+                timestep = timestep / 1000
                 noise_pred = self.transformer(
                     hidden_states=latents,
-                    timestep=timestep / 1000,
+                    timestep=timestep,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -834,11 +841,34 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                     return_dict=False,
                 )[0]
 
+                # Unconditional vector field: $u_{t_i}(Y_{t_i}) = u(Y_{t_i}, t_i, \Phi(\text{""}); \phi)$
                 unconditional_vector_field = noise_pred
+                # Conditional vector field: $u_{t_i}(Y_{t_i} | y_1) = \frac{y_1 - Y_{t_i}}{1 - t_i}$
                 conditional_vector_field = (y1-latents)/(1-timestep)
+                # Controlled vector field: $\hat{u}_{t_i}(Y_{t_i}) = u_{t_i}(Y_{t_i}) + \gamma \left( u_{t_i}(Y_{t_i} | y_1) - u_{t_i}(Y_{t_i}) \right)$
                 controlled_vector_field = unconditional_vector_field + controller_guidance * (conditional_vector_field - unconditional_vector_field)
 
+                latents_dtype = latents.dtype
+                # Next state: $Y_{t_{i+1}} = Y_{t_i} + \hat{u}_{t_i}(Y_{t_i}) \cdot (\sigma(t_{i+1}) - \sigma(t_i))$
                 latents = self.scheduler.step(controlled_vector_field, t, latents, return_dict=False)[0]
+
+                if latents.dtype != latents_dtype:
+                    if torch.backends.mps.is_available():
+                        # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+                        latents = latents.to(latents_dtype)
+
+                if callback_on_step_end is not None:
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
+                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                    latents = callback_outputs.pop("latents", latents)
+                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
 
                 if XLA_AVAILABLE:
                     xm.mark_step()
