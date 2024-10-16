@@ -626,6 +626,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        sigmas = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -764,7 +765,6 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
         # 4.Prepare timesteps
         # Flux noise scheduler $\sigma : [0, 1] \to \mathbb{R}$
-        sigmas = np.linspace(0.0, 1.0, num_inference_steps)
         image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
         mu = calculate_shift(
             image_seq_len,
