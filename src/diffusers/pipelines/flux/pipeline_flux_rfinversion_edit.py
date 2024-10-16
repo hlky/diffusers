@@ -627,10 +627,6 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
-        sigmas = None,
-        flip_schedule = False,
-        even_timesteps = None,
-        divide_timestep = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -767,6 +763,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         )
 
         # 4.Prepare timesteps
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
         image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
         mu = calculate_shift(
             image_seq_len,
@@ -783,9 +780,9 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             sigmas,
             mu=mu,
         )
-        if flip_schedule:
-            self.scheduler.sigmas = self.scheduler.sigmas.flip(0)
-            self.scheduler.timesteps = self.scheduler.timesteps.flip(0)
+        self.scheduler.sigmas = self.scheduler.sigmas.flip(0)
+        self.scheduler.timesteps = self.scheduler.timesteps.flip(0)
+        self.scheduler.sigmas[0] += 1e-6
         print(f"self.scheduler.sigmas {self.scheduler.sigmas}")
         print(f"self.scheduler.timesteps {self.scheduler.timesteps}")
         timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
@@ -840,21 +837,14 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
         # 6. Denoising loop
         with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
+            for i in range(self._num_timesteps - 1):
                 if self.interrupt:
                     continue
-                # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                if even_timesteps is None:
-                    timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                    if divide_timestep:
-                        timestep = timestep / 1000
-                else:
-                    timestep = torch.tensor([even_timesteps[i]], device=latents.device, dtype=latents.dtype)
+                timestep = torch.tensor([self.scheduler.sigmas[i]], device=latents.device, dtype=latents.dtype)
                 # Unconditional vector field: $v_{t_i}(X_{t_i}) = -u(X_{t_i}, 1 - t_i, \Phi(\text{prompt}); \phi)$
-                timestep = 1-timestep
                 unconditional_vector_field = -self.transformer(
                     hidden_states=latents,
-                    timestep=timestep if divide_timestep else timestep / 1000,
+                    timestep=timestep,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
@@ -865,30 +855,23 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                 )[0]
 
                 # consider a time-varying controller guidance schedule ηt = η ∀t ≤ τ and 0 otherwise
-                control_guidance = controller_guidance if i < stopping_time else 0.0
                 # Conditional vector field: $v_{t_i}(X_{t_i} | y_0) = \frac{y_0 - X_{t_i}}{1 - t_i}$
-                conditional_vector_field = (reference_image - latents) / timestep
+                t_i = i / self._num_timesteps
+                conditional_vector_field = (reference_image - latents) / (1-t_i)
                 # Controlled vector field: $\hat{v}_{t_i}(X_{t_i}) = v_{t_i}(X_{t_i}) + \eta \left( v_{t_i}(X_{t_i} | y_0) - v_{t_i}(X_{t_i}) \right)$
-                controlled_vector_field = unconditional_vector_field + control_guidance * (conditional_vector_field - unconditional_vector_field)
+                controlled_vector_field = unconditional_vector_field
+                if i < stopping_time:
+                    controlled_vector_field = unconditional_vector_field + controller_guidance * (conditional_vector_field - unconditional_vector_field)
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
                 # Next state: $X_{t_{i+1}} = X_{t_i} + \hat{v}_{t_i}(X_{t_i}) \cdot (\sigma(t_{i+1}) - \sigma(t_i))$
-                latents = self.scheduler.step(controlled_vector_field, t, latents, return_dict=False)[0]
+                latents = latents + controlled_vector_field  * (self.scheduler.sigmas[i+1] - self.scheduler.sigmas[i])
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
                         # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
                         latents = latents.to(latents_dtype)
-
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
-
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
