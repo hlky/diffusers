@@ -67,7 +67,7 @@ EXAMPLE_DOC_STRING = """
         >>> structured_noise = ... # from FluxRFInversionNoisePipeline
 
         >>> image = pipe(
-        ...     prompt=prompt, num_inference_steps=28, guidance_scale=3.5,
+        ...     prompt=prompt, num_inference_steps=28, guidance_scale=3.5, strength=1.0,
         ...     controller_guidance=0.9, stopping_time=6, reference_image=init_image, latents=structured_noise,
         ... ).images[0]
         ```
