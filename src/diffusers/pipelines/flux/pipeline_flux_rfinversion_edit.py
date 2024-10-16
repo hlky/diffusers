@@ -735,7 +735,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         self._interrupt = False
 
         # 2. Preprocess image
-        reference_image = self.image_processor.preprocess(image, height=height, width=width)
+        reference_image = self.image_processor.preprocess(reference_image, height=height, width=width)
         reference_image = reference_image.to(dtype=torch.float32)
 
         # 3. Define call parameters
