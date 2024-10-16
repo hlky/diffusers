@@ -629,6 +629,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         sigmas = None,
         flip_schedule = False,
         even_timesteps = None,
+        divide_timestep = True
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -836,12 +837,13 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                     continue
                 if even_timesteps is None:
                     timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                    timestep = timestep / 1000
+                    if divide_timestep:
+                        timestep = timestep / 1000
                 else:
-                    timestep = even_timesteps[i]
+                    timestep = torch.tensor([even_timesteps[i]], device=latents.device, dtype=latents.dtype)
                 noise_pred = self.transformer(
                     hidden_states=latents,
-                    timestep=timestep,
+                    timestep=timestep if divide_timestep else timestep / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,

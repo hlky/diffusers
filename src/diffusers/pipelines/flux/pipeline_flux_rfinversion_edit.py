@@ -627,6 +627,10 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        sigmas = None,
+        flip_schedule = False,
+        even_timesteps = None,
+        divide_timestep = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -763,8 +767,6 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         )
 
         # 4.Prepare timesteps
-        # Flux noise scheduler $\sigma : [0, 1] \to \mathbb{R}$
-        sigmas = np.linspace(0.0, 1.0, num_inference_steps)
         image_seq_len = (int(height) // self.vae_scale_factor) * (int(width) // self.vae_scale_factor)
         mu = calculate_shift(
             image_seq_len,
@@ -781,6 +783,11 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             sigmas,
             mu=mu,
         )
+        if flip_schedule:
+            self.scheduler.sigmas = self.scheduler.sigmas.flip(0)
+            self.scheduler.timesteps = self.scheduler.timesteps.flip(0)
+        print(f"self.scheduler.sigmas {self.scheduler.sigmas}")
+        print(f"self.scheduler.timesteps {self.scheduler.timesteps}")
         timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
 
         if num_inference_steps < 1:
@@ -837,13 +844,17 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                 if self.interrupt:
                     continue
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
-                timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                timestep = timestep / 1000
+                if even_timesteps is None:
+                    timestep = t.expand(latents.shape[0]).to(latents.dtype)
+                    if divide_timestep:
+                        timestep = timestep / 1000
+                else:
+                    timestep = torch.tensor([even_timesteps[i]], device=latents.device, dtype=latents.dtype)
                 # Unconditional vector field: $v_{t_i}(X_{t_i}) = -u(X_{t_i}, 1 - t_i, \Phi(\text{prompt}); \phi)$
                 timestep = 1-timestep
                 unconditional_vector_field = -self.transformer(
                     hidden_states=latents,
-                    timestep=timestep,
+                    timestep=timestep if divide_timestep else timestep / 1000,
                     guidance=guidance,
                     pooled_projections=pooled_prompt_embeds,
                     encoder_hidden_states=prompt_embeds,
