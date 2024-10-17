@@ -550,9 +550,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         else:
             image_latents = torch.cat([image_latents], dim=0)
 
-        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = self.scheduler.scale_noise(image_latents, timestep, noise)
-        latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        latents = self._pack_latents(image_latents, batch_size, num_channels_latents, height, width)
         return latents, latent_image_ids
 
     @property
@@ -855,7 +853,7 @@ class FluxRFInversionNoisePipeline(DiffusionPipeline, FluxLoraLoaderMixin):
 
                 latents_dtype = latents.dtype
                 # Next state: $Y_{t_{i+1}} = Y_{t_i} + \hat{u}_{t_i}(Y_{t_i}) \cdot (\sigma(t_{i+1}) - \sigma(t_i))$
-                latents = latents + controlled_vector_field  * (self.scheduler.sigmas[i] - self.scheduler.sigmas[i+1])
+                latents = latents + controlled_vector_field  * (self.scheduler.sigmas[i+1] - self.scheduler.sigmas[i])
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():

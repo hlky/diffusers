@@ -580,9 +580,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
         else:
             image_latents = torch.cat([image_latents], dim=0)
 
-        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = self.scheduler.scale_noise(image_latents, timestep, noise)
-        latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        latents = self._pack_latents(image_latents, batch_size, num_channels_latents, height, width)
         return latents, latent_image_ids
 
     @property
@@ -780,9 +778,6 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
             sigmas,
             mu=mu,
         )
-        self.scheduler.sigmas = self.scheduler.sigmas.flip(0)
-        self.scheduler.timesteps = self.scheduler.timesteps.flip(0)
-        self.scheduler.sigmas[0] += 1e-6
         print(f"self.scheduler.sigmas {self.scheduler.sigmas}")
         print(f"self.scheduler.timesteps {self.scheduler.timesteps}")
         timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
@@ -866,7 +861,7 @@ class FluxRFInversionEditPipeline(DiffusionPipeline, FluxLoraLoaderMixin):
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype
                 # Next state: $X_{t_{i+1}} = X_{t_i} + \hat{v}_{t_i}(X_{t_i}) \cdot (\sigma(t_{i+1}) - \sigma(t_i))$
-                latents = latents + controlled_vector_field  * (self.scheduler.sigmas[i+1] - self.scheduler.sigmas[i])
+                latents = latents + controlled_vector_field  * (sigmas[i] - sigmas[i+1])
 
                 if latents.dtype != latents_dtype:
                     if torch.backends.mps.is_available():
