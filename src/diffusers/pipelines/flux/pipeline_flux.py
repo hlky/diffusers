@@ -449,6 +449,8 @@ class FluxPipeline(
 
         image = image.to(device=device, dtype=dtype)
         image_embeds = self.image_encoder(image).image_embeds
+        # flux-ip-adapter-v2
+        image_embeds = torch.mean(image_embeds)
         image_embeds = image_embeds.repeat_interleave(num_images_per_prompt, dim=0)
         return image_embeds
 
