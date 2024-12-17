@@ -2604,15 +2604,15 @@ class FluxIPAdapterJointAttnProcessor2_0(torch.nn.Module):
             ip_hidden_states = image_projection
 
             ip_query = hidden_states_query_proj
-            ip_attn_output = None
+            ip_attn_outputs = []
             # for ip-adapter
             # TODO: fix for multiple
-            # NOTE: run zeros image embed at the same time?
             for current_ip_hidden_states, scale, to_k_ip, to_v_ip in zip(
                 ip_hidden_states, self.scale, self.to_k_ip, self.to_v_ip
             ):
-                ip_key = to_k_ip(current_ip_hidden_states)
-                ip_value = to_v_ip(current_ip_hidden_states)
+                positive_ip, negative_ip = current_ip_hidden_states
+                ip_key = to_k_ip(positive_ip)
+                ip_value = to_v_ip(positive_ip)
 
                 ip_key = ip_key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
                 ip_value = ip_value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
@@ -2624,8 +2624,24 @@ class FluxIPAdapterJointAttnProcessor2_0(torch.nn.Module):
                 ip_attn_output = ip_attn_output.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
                 ip_attn_output = scale * ip_attn_output
                 ip_attn_output = ip_attn_output.to(ip_query.dtype)
+                ip_attn_outputs.append(ip_attn_output)
 
-            return hidden_states, encoder_hidden_states, ip_attn_output
+                ip_key = to_k_ip(negative_ip)
+                ip_value = to_v_ip(negative_ip)
+
+                ip_key = ip_key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+                ip_value = ip_value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
+                # the output of sdp = (batch, num_heads, seq_len, head_dim)
+                # TODO: add support for attn.scale when we move to Torch 2.1
+                ip_attn_output = F.scaled_dot_product_attention(
+                    ip_query, ip_key, ip_value, attn_mask=None, dropout_p=0.0, is_causal=False
+                )
+                ip_attn_output = ip_attn_output.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
+                ip_attn_output = scale * ip_attn_output
+                ip_attn_output = ip_attn_output.to(ip_query.dtype)
+                ip_attn_outputs.append(ip_attn_output)
+
+            return hidden_states, encoder_hidden_states, ip_attn_outputs
         else:
             return hidden_states
 

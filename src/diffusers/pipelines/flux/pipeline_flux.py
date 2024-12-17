@@ -401,9 +401,11 @@ class FluxPipeline(
         return image_embeds
 
     def prepare_ip_adapter_image_embeds(
-        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt
+        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt, height, width, dtype
     ):
         image_embeds = []
+        negative_embeds = []
+        negative_image = np.zeros((width, height, 3), dtype=np.uint8)
         if ip_adapter_image_embeds is None:
             if not isinstance(ip_adapter_image, list):
                 ip_adapter_image = [ip_adapter_image]
@@ -417,19 +419,27 @@ class FluxPipeline(
                 ip_adapter_image, self.transformer.encoder_hid_proj.image_projection_layers
             ):
                 single_image_embeds = self.encode_image(single_ip_adapter_image, device, 1)
+                negative_image_embeds = self.encode_image(negative_image, device, 1)
 
                 image_embeds.append(single_image_embeds[None, :])
                 image_embeds = self.transformer.encoder_hid_proj(image_embeds)
+                negative_embeds.append(negative_image_embeds[None, :])
+                negative_embeds = self.transformer.encoder_hid_proj(negative_embeds)
         else:
             for single_image_embeds in ip_adapter_image_embeds:
                 image_embeds = self.transformer.encoder_hid_proj(single_image_embeds)
                 image_embeds.append(single_image_embeds)
+                negative_image_embeds = self.encode_image(negative_image, device, 1)
+                negative_embeds.append(negative_image_embeds[None, :])
+                negative_embeds = self.transformer.encoder_hid_proj(negative_embeds)
 
         ip_adapter_image_embeds = []
-        for i, single_image_embeds in enumerate(image_embeds):
+        for i, (single_image_embeds, negative_image_embed) in enumerate(zip(image_embeds, negative_embeds)):
             single_image_embeds = torch.cat([single_image_embeds] * num_images_per_prompt, dim=0)
-            single_image_embeds = single_image_embeds.to(device=device)
-            ip_adapter_image_embeds.append(single_image_embeds)
+            single_image_embeds = single_image_embeds.to(device=device, dtype=dtype)
+            negative_image_embed = torch.cat([negative_image_embed] * num_images_per_prompt, dim=0)
+            negative_image_embed = negative_image_embed.to(device=device, dtype=dtype)
+            ip_adapter_image_embeds.append((single_image_embeds, negative_image_embed))
 
         return ip_adapter_image_embeds
 
@@ -794,6 +804,9 @@ class FluxPipeline(
                 ip_adapter_image_embeds,
                 device,
                 batch_size * num_images_per_prompt,
+                height,
+                width,
+                latents.dtype,
             )
             if self.joint_attention_kwargs is None:
                 self._joint_attention_kwargs = {}

@@ -187,7 +187,7 @@ class FluxTransformerBlock(nn.Module):
         if len(attention_outputs) == 2:
             attn_output, context_attn_output = attention_outputs
         elif len(attention_outputs) == 3:
-            attn_output, context_attn_output, ip_attn_output = attention_outputs
+            attn_output, context_attn_output, ip_attn_outputs = attention_outputs
 
         # Process attention outputs for the `hidden_states`.
         attn_output = gate_msa.unsqueeze(1) * attn_output
@@ -201,7 +201,8 @@ class FluxTransformerBlock(nn.Module):
 
         hidden_states = hidden_states + ff_output
         if len(attention_outputs) == 3:
-            hidden_states = hidden_states + ip_attn_output
+            positive_ip_attn, negative_ip_attn = ip_attn_outputs
+            hidden_states = hidden_states + positive_ip_attn + negative_ip_attn
 
         # Process attention outputs for the `encoder_hidden_states`.
 
