@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Union
 
+import numpy as np
 import torch
 from huggingface_hub.utils import validate_hf_hub_args
 
@@ -375,6 +376,53 @@ class SamplingMixin:
 
         velocity = sqrt_alpha_prod * noise - sqrt_one_minus_alpha_prod * sample
         return velocity
+
+    def _get_variance(self, timestep, prev_timestep):
+        alpha_prod_t = self._schedule.alphas_cumprod[timestep]
+        alpha_prod_t_prev = (
+            self._schedule.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.final_alpha_cumprod
+        )
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+
+        variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
+
+        return variance
+
+    def _threshold_sample(self, sample: torch.Tensor) -> torch.Tensor:
+        """
+        "Dynamic thresholding: At each sampling step we set s to a certain percentile absolute pixel value in xt0 (the
+        prediction of x_0 at timestep t), and if s > 1, then we threshold xt0 to the range [-s, s] and then divide by
+        s. Dynamic thresholding pushes saturated pixels (those near -1 and 1) inwards, thereby actively preventing
+        pixels from saturation at each step. We find that dynamic thresholding results in significantly better
+        photorealism as well as better image-text alignment, especially when using very large guidance weights."
+
+        https://arxiv.org/abs/2205.11487
+        """
+        if self._schedule.__class__.__name__ != "BetaSchedule":
+            raise ValueError("`_get_variance` only supports `BetaSchedule`.")
+        dtype = sample.dtype
+        batch_size, channels, *remaining_dims = sample.shape
+
+        if dtype not in (torch.float32, torch.float64):
+            sample = sample.float()  # upcast for quantile calculation, and clamp not implemented for cpu half
+
+        # Flatten sample for doing quantile calculation along each image
+        sample = sample.reshape(batch_size, channels * np.prod(remaining_dims))
+
+        abs_sample = sample.abs()  # "a certain percentile absolute pixel value"
+
+        s = torch.quantile(abs_sample, self.config.dynamic_thresholding_ratio, dim=1)
+        s = torch.clamp(
+            s, min=1, max=self.config.sample_max_value
+        )  # When clamped to min=1, equivalent to standard clipping to [-1, 1]
+        s = s.unsqueeze(1)  # (batch_size, 1) because clamp will broadcast along dim=0
+        sample = torch.clamp(sample, -s, s) / s  # "we threshold xt0 to the range [-s, s] and then divide by s"
+
+        sample = sample.reshape(batch_size, channels, *remaining_dims)
+        sample = sample.to(dtype)
+
+        return sample
 
     def __len__(self):
         return self.config.num_train_timesteps

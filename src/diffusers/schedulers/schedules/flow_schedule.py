@@ -109,7 +109,6 @@ class FlowMatchSchedule:
         sigma_max: Optional[float] = None,
         **kwargs,
     ):
-        self.set_base_schedule(base_schedule)
         self.num_train_timesteps = num_train_timesteps
         self.shift = shift
         self.use_dynamic_shifting = use_dynamic_shifting
@@ -121,6 +120,14 @@ class FlowMatchSchedule:
         self.shift_terminal = shift_terminal
         self.sigma_min = sigma_min
         self.sigma_max = sigma_max
+        self.set_base_schedule(base_schedule)
+        sigmas = self.base_schedule(
+            num_inference_steps=self.num_train_timesteps,
+            num_train_timesteps=self.num_train_timesteps,
+            shift=self.shift,
+            use_dynamic_shifting=self.use_dynamic_shifting,
+        )
+        self.alphas_cumprod = 1 / (sigmas**2 + 1)
 
     def set_base_schedule(self, base_schedule: Union[str]):
         if base_schedule is None:
@@ -132,6 +139,13 @@ class FlowMatchSchedule:
             self.base_schedule = _class()
         else:
             self.base_schedule = base_schedule()
+        sigmas = self.base_schedule(
+            num_inference_steps=self.num_train_timesteps,
+            num_train_timesteps=self.num_train_timesteps,
+            shift=self.shift,
+            use_dynamic_shifting=self.use_dynamic_shifting,
+        )
+        self.alphas_cumprod = 1 / (sigmas**2 + 1)
 
     def time_shift(self, mu: float, sigma: float, t: torch.Tensor):
         return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
@@ -167,6 +181,14 @@ class FlowMatchSchedule:
         mu: Optional[float] = None,
         shift: Optional[float] = None,
     ):
+        if self.alphas_cumprod is None:
+            alphas = self.base_schedule(
+                num_inference_steps=self.num_train_timesteps,
+                num_train_timesteps=self.num_train_timesteps,
+                shift=shift,
+                use_dynamic_shifting=self.use_dynamic_shifting,
+            )
+            self.alphas_cumprod = torch.from_numpy(alphas).to(dtype=torch.float32, device=device)
         shift = shift or self.shift
         if self.use_dynamic_shifting and mu is None:
             raise ValueError("You have to pass a value for `mu` when `use_dynamic_shifting` is set to be `True`")

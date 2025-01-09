@@ -11,14 +11,24 @@ class DDIMSchedulerTest(SchedulerCommonTest):
 
     def get_scheduler_config(self, **kwargs):
         config = {
-            "num_train_timesteps": 1000,
-            "beta_start": 0.0001,
-            "beta_end": 0.02,
-            "beta_schedule": "linear",
+            "schedule_config": {
+                "class_name": "BetaSchedule",
+                "num_train_timesteps": 1000,
+                "beta_start": 0.0001,
+                "beta_end": 0.02,
+                "beta_schedule": "linear",
+                "timestep_spacing": "leading",
+            },
+            "sigma_schedule_config": None,
             "clip_sample": True,
         }
 
-        config.update(**kwargs)
+        for key, value in kwargs.items():
+            if isinstance(value, dict):
+                config[key].update(**value)
+            else:
+                config[key] = value
+
         return config
 
     def full_loop(self, **config):
@@ -41,25 +51,25 @@ class DDIMSchedulerTest(SchedulerCommonTest):
 
     def test_timesteps(self):
         for timesteps in [100, 500, 1000]:
-            self.check_over_configs(num_train_timesteps=timesteps)
+            self.check_over_configs(schedule_config={"num_train_timesteps": timesteps})
 
     def test_steps_offset(self):
         for steps_offset in [0, 1]:
-            self.check_over_configs(steps_offset=steps_offset)
+            self.check_over_configs(schedule_config={"steps_offset": steps_offset})
 
         scheduler_class = self.scheduler_classes[0]
-        scheduler_config = self.get_scheduler_config(steps_offset=1)
+        scheduler_config = self.get_scheduler_config(schedule_config={"steps_offset": 1})
         scheduler = scheduler_class(**scheduler_config)
         scheduler.set_timesteps(5)
         assert torch.equal(scheduler.timesteps, torch.LongTensor([801, 601, 401, 201, 1]))
 
     def test_betas(self):
         for beta_start, beta_end in zip([0.0001, 0.001, 0.01, 0.1], [0.002, 0.02, 0.2, 2]):
-            self.check_over_configs(beta_start=beta_start, beta_end=beta_end)
+            self.check_over_configs(schedule_config={"beta_start": beta_start, "beta_end": beta_end})
 
     def test_schedules(self):
         for schedule in ["linear", "squaredcos_cap_v2"]:
-            self.check_over_configs(beta_schedule=schedule)
+            self.check_over_configs(schedule_config={"beta_schedule": schedule})
 
     def test_prediction_type(self):
         for prediction_type in ["epsilon", "v_prediction"]:
@@ -71,11 +81,11 @@ class DDIMSchedulerTest(SchedulerCommonTest):
 
     def test_timestep_spacing(self):
         for timestep_spacing in ["trailing", "leading"]:
-            self.check_over_configs(timestep_spacing=timestep_spacing)
+            self.check_over_configs(schedule_config={"timestep_spacing": timestep_spacing})
 
     def test_rescale_betas_zero_snr(self):
         for rescale_betas_zero_snr in [True, False]:
-            self.check_over_configs(rescale_betas_zero_snr=rescale_betas_zero_snr)
+            self.check_over_configs(schedule_config={"rescale_betas_zero_snr": rescale_betas_zero_snr})
 
     def test_thresholding(self):
         self.check_over_configs(thresholding=False)
@@ -131,7 +141,7 @@ class DDIMSchedulerTest(SchedulerCommonTest):
 
     def test_full_loop_with_set_alpha_to_one(self):
         # We specify different beta, so that the first alpha is 0.99
-        sample = self.full_loop(set_alpha_to_one=True, beta_start=0.01)
+        sample = self.full_loop(set_alpha_to_one=True, schedule_config={"beta_start": 0.01})
         result_sum = torch.sum(torch.abs(sample))
         result_mean = torch.mean(torch.abs(sample))
 
@@ -140,7 +150,7 @@ class DDIMSchedulerTest(SchedulerCommonTest):
 
     def test_full_loop_with_no_set_alpha_to_one(self):
         # We specify different beta, so that the first alpha is 0.99
-        sample = self.full_loop(set_alpha_to_one=False, beta_start=0.01)
+        sample = self.full_loop(set_alpha_to_one=False, schedule_config={"beta_start": 0.01})
         result_sum = torch.sum(torch.abs(sample))
         result_mean = torch.mean(torch.abs(sample))
 
