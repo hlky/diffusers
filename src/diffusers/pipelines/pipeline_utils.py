@@ -867,7 +867,16 @@ class DiffusionPipeline(ConfigMixin, PushToHubMixin):
         expected_types = pipeline_class._get_signature_types()
         passed_class_obj = {k: kwargs.pop(k) for k in expected_modules if k in kwargs}
         passed_pipe_kwargs = {k: kwargs.pop(k) for k in optional_kwargs if k in kwargs}
-        init_dict, unused_kwargs, _ = pipeline_class.extract_init_dict(config_dict, **kwargs)
+        #init_dict, unused_kwargs, _ = pipeline_class.extract_init_dict(config_dict, **kwargs, **passed_pipe_kwargs)
+        init_dict = {}
+        unused_kwargs = {}
+        _ = expected_types.pop("self")
+        for key, model_class in expected_types.items():
+            class_str = str(model_class[0])
+            class_split = class_str.split(".")
+            library_name = class_split[0].split("'")[-1]
+            class_name = class_split[-1].split("'")[0]
+            init_dict[key] = (library_name, class_name,)
 
         # define init kwargs and make sure that optional component modules are filtered out
         init_kwargs = {
