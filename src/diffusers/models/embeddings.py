@@ -2623,9 +2623,11 @@ class MultiIPAdapterImageProjection(nn.Module):
         return projected_image_embeds
 
 
-class HiDreamImagePooledEmbed(nn.Module):
-    def __init__(self, text_emb_dim, hidden_size):
+class HiDreamImagePooledTimestepEmbed(nn.Module):
+    def __init__(self, hidden_size, text_emb_dim, frequency_embedding_size=256):
         super().__init__()
+        self.time_proj = Timesteps(num_channels=frequency_embedding_size, flip_sin_to_cos=True, downscale_freq_shift=0)
+        self.timestep_embedder = TimestepEmbedding(in_channels=frequency_embedding_size, time_embed_dim=hidden_size)
         self.pooled_embedder = TimestepEmbedding(in_channels=text_emb_dim, time_embed_dim=hidden_size)
         self.apply(self._init_weights)
 
@@ -2635,27 +2637,11 @@ class HiDreamImagePooledEmbed(nn.Module):
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, pooled_embed):
-        return self.pooled_embedder(pooled_embed)
-
-
-class HiDreamImageTimestepEmbed(nn.Module):
-    def __init__(self, hidden_size, frequency_embedding_size=256):
-        super().__init__()
-        self.time_proj = Timesteps(num_channels=frequency_embedding_size, flip_sin_to_cos=True, downscale_freq_shift=0)
-        self.timestep_embedder = TimestepEmbedding(in_channels=frequency_embedding_size, time_embed_dim=hidden_size)
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            nn.init.normal_(m.weight, std=0.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, timesteps, wdtype):
+    def forward(self, timesteps, pooled_embeds, wdtype):
         t_emb = self.time_proj(timesteps).to(dtype=wdtype)
         t_emb = self.timestep_embedder(t_emb)
-        return t_emb
+        pooled_proj = self.pooled_embedder(pooled_embeds).to(dtype=wdtype)
+        return t_emb + pooled_proj
 
 
 class HiDreamImageOutEmbed(nn.Module):
@@ -2701,34 +2687,3 @@ class HiDreamImagePatchEmbed(nn.Module):
     def forward(self, latent):
         latent = self.proj(latent)
         return latent
-
-
-def rope(pos: torch.Tensor, dim: int, theta: int) -> torch.Tensor:
-    assert dim % 2 == 0, "The dimension must be even."
-
-    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
-    omega = 1.0 / (theta**scale)
-
-    batch_size, seq_length = pos.shape
-    out = torch.einsum("...n,d->...nd", pos, omega)
-    cos_out = torch.cos(out)
-    sin_out = torch.sin(out)
-
-    stacked_out = torch.stack([cos_out, -sin_out, sin_out, cos_out], dim=-1)
-    out = stacked_out.view(batch_size, -1, dim // 2, 2, 2)
-    return out.float()
-
-
-class HiDreamImageEmbedND(nn.Module):
-    def __init__(self, theta: int, axes_dim: List[int]):
-        super().__init__()
-        self.theta = theta
-        self.axes_dim = axes_dim
-
-    def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        n_axes = ids.shape[-1]
-        emb = torch.cat(
-            [rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(n_axes)],
-            dim=-3,
-        )
-        return emb.unsqueeze(2)

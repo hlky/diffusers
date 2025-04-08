@@ -111,10 +111,7 @@ def retrieve_timesteps(
 
 
 class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
-    model_cpu_offload_seq = (
-        "text_encoder->text_encoder_2->text_encoder_3->text_encoder_4->image_encoder->transformer->vae"
-    )
-    _optional_components = ["image_encoder", "feature_extractor"]
+    model_cpu_offload_seq = "text_encoder->text_encoder_2->text_encoder_3->text_encoder_4->transformer->vae"
     _callback_tensor_inputs = ["latents", "prompt_embeds"]
 
     def __init__(
@@ -215,10 +212,14 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         prompt = [prompt] if isinstance(prompt, str) else prompt
         batch_size = len(prompt)
 
+        # NOTE: this is from the original code
+        # Matches max_position_embeddings https://huggingface.co/HiDream-ai/HiDream-I1-Full/blob/61848b939643432548f1a59d4e581af54f04356e/text_encoder_2/config.json#L15
+        _max_sequence_length = 218
+
         text_inputs = tokenizer(
             prompt,
             padding="max_length",
-            max_length=min(max_sequence_length, 218),
+            max_length=min(max_sequence_length, _max_sequence_length),
             truncation=True,
             return_tensors="pt",
         )
@@ -226,10 +227,10 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         text_input_ids = text_inputs.input_ids
         untruncated_ids = tokenizer(prompt, padding="longest", return_tensors="pt").input_ids
         if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
-            removed_text = tokenizer.batch_decode(untruncated_ids[:, 218 - 1 : -1])
+            removed_text = tokenizer.batch_decode(untruncated_ids[:, _max_sequence_length - 1 : -1])
             logger.warning(
                 "The following part of your input was truncated because CLIP can only handle sequences up to"
-                f" {218} tokens: {removed_text}"
+                f" {_max_sequence_length} tokens: {removed_text}"
             )
         prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
 
@@ -472,6 +473,20 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         """
         self.vae.disable_tiling()
 
+    @staticmethod
+    def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
+        latent_image_ids = torch.zeros(height, width, 3)
+        latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
+        latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
+
+        latent_image_id_height, latent_image_id_width, latent_image_id_channels = latent_image_ids.shape
+
+        latent_image_ids = latent_image_ids.reshape(
+            latent_image_id_height * latent_image_id_width, latent_image_id_channels
+        )
+
+        return latent_image_ids.to(device=device, dtype=dtype)
+
     def prepare_latents(
         self,
         batch_size,
@@ -496,7 +511,10 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
             if latents.shape != shape:
                 raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
             latents = latents.to(device)
-        return latents
+
+        latent_image_ids = self._prepare_latent_image_ids(batch_size, height // 2, width // 2, device, dtype)
+
+        return latents, latent_image_ids
 
     @property
     def guidance_scale(self):
@@ -552,8 +570,8 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         width = width or self.default_sample_size * self.vae_scale_factor
 
         division = self.vae_scale_factor * 2
-        S_max = (self.default_sample_size * self.vae_scale_factor) ** 2
-        scale = S_max / (width * height)
+        scale_max = (self.default_sample_size * self.vae_scale_factor) ** 2
+        scale = scale_max / (width * height)
         scale = math.sqrt(scale)
         width, height = int(width * scale // division * division), int(height * scale // division * division)
 
@@ -600,18 +618,18 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         )
 
         if self.do_classifier_free_guidance:
-            prompt_embeds_arr = []
-            for n, p in zip(negative_prompt_embeds, prompt_embeds):
-                if len(n.shape) == 3:
-                    prompt_embeds_arr.append(torch.cat([n, p], dim=0))
+            _prompt_embeds = []
+            for negative_prompt_embed, prompt_embed in zip(negative_prompt_embeds, prompt_embeds):
+                if len(negative_prompt_embed.shape) == 3:
+                    _prompt_embeds.append(torch.cat([negative_prompt_embed, prompt_embed], dim=0))
                 else:
-                    prompt_embeds_arr.append(torch.cat([n, p], dim=1))
-            prompt_embeds = prompt_embeds_arr
+                    _prompt_embeds.append(torch.cat([negative_prompt_embed, prompt_embed], dim=1))
+            prompt_embeds = _prompt_embeds
             pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
 
         # 4. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels
-        latents = self.prepare_latents(
+        latents, latent_image_ids = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -624,23 +642,14 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
 
         if latents.shape[-2] != latents.shape[-1]:
             B, C, H, W = latents.shape
-            pH, pW = H // self.transformer.config.patch_size, W // self.transformer.config.patch_size
+            patch_H, patch_W = H // self.transformer.config.patch_size, W // self.transformer.config.patch_size
 
-            img_sizes = torch.tensor([pH, pW], dtype=torch.int64).reshape(-1)
-            img_ids = torch.zeros(pH, pW, 3)
-            img_ids[..., 1] = img_ids[..., 1] + torch.arange(pH)[:, None]
-            img_ids[..., 2] = img_ids[..., 2] + torch.arange(pW)[None, :]
-            img_ids = img_ids.reshape(pH * pW, -1)
-            img_ids_pad = torch.zeros(self.transformer.max_seq, 3)
-            img_ids_pad[: pH * pW, :] = img_ids
-
-            img_sizes = img_sizes.unsqueeze(0).to(latents.device)
-            img_ids = img_ids_pad.unsqueeze(0).to(latents.device)
-            if self.do_classifier_free_guidance:
-                img_sizes = img_sizes.repeat(2 * B, 1)
-                img_ids = img_ids.repeat(2 * B, 1, 1)
+            image_sizes = (
+                patch_H,
+                patch_W,
+            )
         else:
-            img_sizes = img_ids = None
+            image_sizes = latent_image_ids = None
 
         # 5. Prepare timesteps
         mu = calculate_shift(self.transformer.max_seq)
@@ -690,8 +699,8 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
                     timesteps=timestep,
                     encoder_hidden_states=prompt_embeds,
                     pooled_embeds=pooled_prompt_embeds,
-                    img_sizes=img_sizes,
-                    img_ids=img_ids,
+                    image_sizes=image_sizes,
+                    img_ids=latent_image_ids,
                     return_dict=False,
                 )[0]
                 noise_pred = -noise_pred
@@ -718,7 +727,6 @@ class HiDreamImagePipeline(DiffusionPipeline, FromSingleFileMixin):
 
                     latents = callback_outputs.pop("latents", latents)
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
 
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
