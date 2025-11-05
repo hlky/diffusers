@@ -229,6 +229,7 @@ _flash_attn_3_available, _flash_attn_3_version = _is_package_available("flash_at
 _aiter_available, _aiter_version = _is_package_available("aiter")
 _kornia_available, _kornia_version = _is_package_available("kornia")
 _nvidia_modelopt_available, _nvidia_modelopt_version = _is_package_available("modelopt", get_dist_name=True)
+_pyav_available, _pyav_version = _is_package_available("av")
 
 
 def is_torch_available():
@@ -415,6 +416,10 @@ def is_kornia_available():
     return _kornia_available
 
 
+def is_pyav_available():
+    return _pyav_available
+
+
 # docstyle-ignore
 FLAX_IMPORT_ERROR = """
 {0} requires the FLAX library but it was not found in your environment. Checkout the instructions on the
@@ -578,6 +583,11 @@ NLTK_IMPORT_ERROR = """
 {0} requires the nltk library but it was not found in your environment. You can install it with pip: `pip install nltk`
 """
 
+# docstyle-ignore
+PYAV_IMPORT_ERROR = """
+{0} requires the pyav library but it was not found in your environment. You can install it with pip: `pip install av`
+"""
+
 
 BACKENDS_MAPPING = OrderedDict(
     [
@@ -610,6 +620,7 @@ BACKENDS_MAPPING = OrderedDict(
         ("pytorch_retinaface", (is_pytorch_retinaface_available, PYTORCH_RETINAFACE_IMPORT_ERROR)),
         ("better_profanity", (is_better_profanity_available, BETTER_PROFANITY_IMPORT_ERROR)),
         ("nltk", (is_nltk_available, NLTK_IMPORT_ERROR)),
+        ("pyav", (is_pyav_available, PYAV_IMPORT_ERROR)),
     ]
 )
 

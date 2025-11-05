@@ -9,7 +9,7 @@ import numpy as np
 import PIL.Image
 import PIL.ImageOps
 
-from .import_utils import BACKENDS_MAPPING, is_imageio_available, is_opencv_available
+from .import_utils import BACKENDS_MAPPING, is_imageio_available, is_opencv_available, is_pyav_available
 from .logging import get_logger
 
 
@@ -210,5 +210,46 @@ def export_to_video(
     ) as writer:
         for frame in video_frames:
             writer.append_data(frame)
+
+    return output_video_path
+
+
+def export_to_video_av(
+    video_frames: Union[List[np.ndarray], List[PIL.Image.Image]],
+    output_video_path: str = None,
+    fps: float = 10,
+    codec: str = "libx264",
+    pix_fmt: str = "yuv420p",
+    options: dict = {},
+):
+    if is_pyav_available():
+        import av
+    else:
+        raise ImportError(BACKENDS_MAPPING["pyav"][1].format("export_to_video"))
+
+    if output_video_path is None:
+        output_video_path = tempfile.NamedTemporaryFile(suffix=".mp4").name
+
+    if isinstance(video_frames[0], np.ndarray):
+        video_frames = [(frame * 255).astype(np.uint8) for frame in video_frames]
+
+    elif isinstance(video_frames[0], PIL.Image.Image):
+        video_frames = [np.array(frame) for frame in video_frames]
+
+    first_frame = video_frames[0]
+    height, width, _ = first_frame.shape
+
+    container = av.open(output_video_path, mode="w")
+    stream: av.VideoStream = container.add_stream(codec, rate=fps, options=options, height=height, width=width)
+    stream.pix_fmt = pix_fmt
+    for video_frame in video_frames:
+        frame = av.VideoFrame.from_ndarray(video_frame)
+        container.mux(stream.encode_lazy(frame))
+
+    # Flush stream
+    for packet in stream.encode():
+        container.mux(packet)
+
+    container.close()
 
     return output_video_path
