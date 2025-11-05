@@ -145,6 +145,7 @@ def export_to_video(
     quality: float = 5.0,
     bitrate: Optional[int] = None,
     macro_block_size: Optional[int] = 16,
+    **kwargs,
 ) -> str:
     """
     quality:
@@ -163,6 +164,10 @@ def export_to_video(
         are compatible with a macroblock size of 16 (default), some can go smaller (4, 8). To disable this automatic
         feature set it to None or 1, however be warned many players can't decode videos that are odd in size and some
         codecs will produce poor results or fail. See https://en.wikipedia.org/wiki/Macroblock.
+
+    kwargs:
+        Passed to imageio-ffmpeg.
+        See: https://github.com/imageio/imageio-ffmpeg/blob/ae47d8028c237ca5507ceef1b843ee427b442887/imageio_ffmpeg/_io.py#L390
     """
     # TODO: Dhruv. Remove by Diffusers release 0.33.0
     # Added to prevent breaking existing code
@@ -201,7 +206,7 @@ def export_to_video(
         video_frames = [np.array(frame) for frame in video_frames]
 
     with imageio.get_writer(
-        output_video_path, fps=fps, quality=quality, bitrate=bitrate, macro_block_size=macro_block_size
+        output_video_path, fps=fps, quality=quality, bitrate=bitrate, macro_block_size=macro_block_size, **kwargs
     ) as writer:
         for frame in video_frames:
             writer.append_data(frame)
