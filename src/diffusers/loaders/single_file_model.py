@@ -180,11 +180,7 @@ SINGLE_FILE_LOADABLE_CLASSES = {
 
 
 def _should_convert_state_dict_to_diffusers(model_state_dict, checkpoint_state_dict):
-    model_state_dict_keys = set(model_state_dict.keys())
-    checkpoint_state_dict_keys = set(checkpoint_state_dict.keys())
-    is_subset = model_state_dict_keys.issubset(checkpoint_state_dict_keys)
-    is_match = model_state_dict_keys == checkpoint_state_dict_keys
-    return not (is_subset and is_match)
+    return not set(model_state_dict.keys()).issubset(set(checkpoint_state_dict.keys()))
 
 
 def _get_single_file_loadable_mapping_class(cls):
