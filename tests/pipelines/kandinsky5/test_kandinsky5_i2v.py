@@ -214,9 +214,51 @@ class Kandinsky5I2VPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
         batch_size = 2
         sequence_length = 4
-        prompt_embeds_qwen = torch.zeros(batch_size, sequence_length, components["transformer"].config.in_text_dim)
-        prompt_embeds_clip = torch.zeros(batch_size, components["transformer"].config.in_text_dim2)
+        num_videos_per_prompt = 2
+        num_frames = 17
+        height = 32
+        width = 32
+        prompt_embeds_qwen = torch.stack(
+            [
+                torch.full((sequence_length, components["transformer"].config.in_text_dim), 1.0),
+                torch.full((sequence_length, components["transformer"].config.in_text_dim), 2.0),
+            ]
+        )
+        prompt_embeds_clip = torch.stack(
+            [
+                torch.full((components["transformer"].config.in_text_dim2,), 10.0),
+                torch.full((components["transformer"].config.in_text_dim2,), 20.0),
+            ]
+        )
         prompt_cu_seqlens = torch.tensor([0, sequence_length, 2 * sequence_length], dtype=torch.int32)
+        negative_prompt_embeds_qwen = prompt_embeds_qwen + 100
+        negative_prompt_embeds_clip = prompt_embeds_clip + 100
+        num_latent_frames = (num_frames - 1) // pipe.vae_scale_factor_temporal + 1
+        latents = torch.zeros(
+            batch_size * num_videos_per_prompt,
+            num_latent_frames,
+            height // pipe.vae_scale_factor_spatial,
+            width // pipe.vae_scale_factor_spatial,
+            2 * components["transformer"].config.in_visual_dim + 1,
+        )
+        expected_latent_markers = torch.arange(1, batch_size * num_videos_per_prompt + 1, dtype=latents.dtype)
+        latents[:, 0, 0, 0, 0] = expected_latent_markers
+
+        captured_inputs = []
+        original_forward = pipe.transformer.forward
+
+        def capture_forward(*args, **kwargs):
+            captured_inputs.append(
+                {
+                    "hidden_states": kwargs["hidden_states"].detach().cpu().clone(),
+                    "encoder_hidden_states": kwargs["encoder_hidden_states"].detach().cpu().clone(),
+                    "pooled_projections": kwargs["pooled_projections"].detach().cpu().clone(),
+                    "text_rope_pos": kwargs["text_rope_pos"].detach().cpu().clone(),
+                }
+            )
+            return original_forward(*args, **kwargs)
+
+        pipe.transformer.forward = capture_forward
 
         output = pipe(
             image=Image.new("RGB", (32, 32), color="red"),
@@ -224,19 +266,45 @@ class Kandinsky5I2VPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             prompt_embeds_qwen=prompt_embeds_qwen,
             prompt_embeds_clip=prompt_embeds_clip,
             prompt_cu_seqlens=prompt_cu_seqlens,
-            negative_prompt_embeds_qwen=prompt_embeds_qwen,
-            negative_prompt_embeds_clip=prompt_embeds_clip,
+            negative_prompt_embeds_qwen=negative_prompt_embeds_qwen,
+            negative_prompt_embeds_clip=negative_prompt_embeds_clip,
             negative_prompt_cu_seqlens=prompt_cu_seqlens,
-            height=32,
-            width=32,
-            num_frames=17,
+            height=height,
+            width=width,
+            num_frames=num_frames,
             guidance_scale=4.0,
-            num_videos_per_prompt=2,
+            num_videos_per_prompt=num_videos_per_prompt,
             num_inference_steps=1,
+            latents=latents,
             output_type="latent",
         )
 
-        self.assertEqual(output.frames.shape[0], batch_size * 2)
+        self.assertEqual(output.frames.shape[0], batch_size * num_videos_per_prompt)
+        self.assertEqual(len(captured_inputs), 2)
+        torch.testing.assert_close(
+            captured_inputs[0]["encoder_hidden_states"],
+            prompt_embeds_qwen.repeat(1, num_videos_per_prompt, 1).view(
+                batch_size * num_videos_per_prompt, sequence_length, -1
+            ),
+        )
+        torch.testing.assert_close(
+            captured_inputs[1]["encoder_hidden_states"],
+            negative_prompt_embeds_qwen.repeat(1, num_videos_per_prompt, 1).view(
+                batch_size * num_videos_per_prompt, sequence_length, -1
+            ),
+        )
+        torch.testing.assert_close(
+            captured_inputs[0]["pooled_projections"],
+            prompt_embeds_clip.repeat_interleave(num_videos_per_prompt, dim=0),
+        )
+        torch.testing.assert_close(
+            captured_inputs[1]["pooled_projections"],
+            negative_prompt_embeds_clip.repeat_interleave(num_videos_per_prompt, dim=0),
+        )
+        torch.testing.assert_close(captured_inputs[0]["hidden_states"][:, 0, 0, 0, 0], expected_latent_markers)
+        torch.testing.assert_close(captured_inputs[1]["hidden_states"][:, 0, 0, 0, 0], expected_latent_markers)
+        self.assertEqual(captured_inputs[0]["text_rope_pos"].shape[0], sequence_length)
+        self.assertEqual(captured_inputs[1]["text_rope_pos"].shape[0], sequence_length)
 
     @unittest.skip("TODO:Test does not work")
     def test_encode_prompt_works_in_isolation(self):

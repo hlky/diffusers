@@ -83,7 +83,7 @@ EXAMPLE_DOC_STRING = """
 """
 
 
-def basic_clean(text):
+def basic_clean(text: str) -> str:
     """
     Copied from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/wan/pipeline_wan.py
 
@@ -95,7 +95,7 @@ def basic_clean(text):
     return text.strip()
 
 
-def whitespace_clean(text):
+def whitespace_clean(text: str) -> str:
     """
     Copied from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/wan/pipeline_wan.py
 
@@ -106,7 +106,7 @@ def whitespace_clean(text):
     return text
 
 
-def prompt_clean(text):
+def prompt_clean(text: str) -> str:
     """
     Copied from https://github.com/huggingface/diffusers/blob/main/src/diffusers/pipelines/wan/pipeline_wan.py
 
@@ -161,7 +161,7 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         text_encoder_2: CLIPTextModel,
         tokenizer_2: CLIPTokenizer,
         scheduler: FlowMatchEulerDiscreteScheduler,
-    ):
+    ) -> None:
         super().__init__()
 
         self.register_modules(
@@ -187,7 +187,7 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         device: torch.device | None = None,
         max_sequence_length: int = 512,
         dtype: torch.dtype | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Encode prompt using Qwen2.5-VL text encoder.
 
@@ -254,7 +254,7 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         prompt: str | list[str],
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ):
+    ) -> torch.Tensor:
         """
         Encode prompt using CLIP text encoder.
 
@@ -292,7 +292,7 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         max_sequence_length: int = 512,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r"""
         Encodes a single prompt (positive or negative) into text encoder hidden states.
 
@@ -356,11 +356,7 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         )
 
         # CLIP embeddings: repeat for each image
-        prompt_embeds_clip = prompt_embeds_clip.repeat(
-            1, num_images_per_prompt, 1
-        )  # [batch_size, num_images_per_prompt, clip_embed_dim]
-        # Reshape to [batch_size * num_images_per_prompt, clip_embed_dim]
-        prompt_embeds_clip = prompt_embeds_clip.view(batch_size * num_images_per_prompt, -1)
+        prompt_embeds_clip = prompt_embeds_clip.repeat_interleave(num_images_per_prompt, dim=0)
 
         # Repeat cumulative sequence lengths for num_images_per_prompt
         # Original differences (lengths) for each prompt in the batch
@@ -378,19 +374,19 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
 
     def check_inputs(
         self,
-        prompt,
-        negative_prompt,
-        height,
-        width,
-        prompt_embeds_qwen=None,
-        prompt_embeds_clip=None,
-        negative_prompt_embeds_qwen=None,
-        negative_prompt_embeds_clip=None,
-        prompt_cu_seqlens=None,
-        negative_prompt_cu_seqlens=None,
-        callback_on_step_end_tensor_inputs=None,
-        max_sequence_length=None,
-    ):
+        prompt: str | list[str] | None,
+        negative_prompt: str | list[str] | None,
+        height: int,
+        width: int,
+        prompt_embeds_qwen: torch.Tensor | None = None,
+        prompt_embeds_clip: torch.Tensor | None = None,
+        negative_prompt_embeds_qwen: torch.Tensor | None = None,
+        negative_prompt_embeds_clip: torch.Tensor | None = None,
+        prompt_cu_seqlens: torch.Tensor | None = None,
+        negative_prompt_cu_seqlens: torch.Tensor | None = None,
+        callback_on_step_end_tensor_inputs: list[str] | None = None,
+        max_sequence_length: int | None = None,
+    ) -> None:
         """
         Validate input parameters for the pipeline.
 
@@ -516,17 +512,17 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         return latents
 
     @property
-    def guidance_scale(self):
+    def guidance_scale(self) -> float:
         """Get the current guidance scale value."""
         return self._guidance_scale
 
     @property
-    def num_timesteps(self):
+    def num_timesteps(self) -> int:
         """Get the number of denoising timesteps."""
         return self._num_timesteps
 
     @property
-    def interrupt(self):
+    def interrupt(self) -> bool:
         """Check if generation has been interrupted."""
         return self._interrupt
 
@@ -663,8 +659,7 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
             prompt_embeds_qwen = prompt_embeds_qwen.view(
                 batch_size * num_images_per_prompt, -1, prompt_embeds_qwen.shape[-1]
             )
-            prompt_embeds_clip = prompt_embeds_clip.repeat(1, num_images_per_prompt, 1)
-            prompt_embeds_clip = prompt_embeds_clip.view(batch_size * num_images_per_prompt, -1)
+            prompt_embeds_clip = prompt_embeds_clip.repeat_interleave(num_images_per_prompt, dim=0)
             prompt_cu_seqlens = torch.cat(
                 [
                     torch.tensor([0], device=device, dtype=torch.int32),
@@ -704,8 +699,9 @@ class Kandinsky5T2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
                 negative_prompt_embeds_qwen = negative_prompt_embeds_qwen.view(
                     batch_size * num_images_per_prompt, -1, negative_prompt_embeds_qwen.shape[-1]
                 )
-                negative_prompt_embeds_clip = negative_prompt_embeds_clip.repeat(1, num_images_per_prompt, 1)
-                negative_prompt_embeds_clip = negative_prompt_embeds_clip.view(batch_size * num_images_per_prompt, -1)
+                negative_prompt_embeds_clip = negative_prompt_embeds_clip.repeat_interleave(
+                    num_images_per_prompt, dim=0
+                )
                 negative_prompt_cu_seqlens = torch.cat(
                     [
                         torch.tensor([0], device=device, dtype=torch.int32),
