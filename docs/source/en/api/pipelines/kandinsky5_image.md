@@ -59,7 +59,7 @@ output = pipe(
     width=1024,
     num_inference_steps=50,
     guidance_scale=3.5,
-).image[0]
+).images[0]
 ```
 
 ### Basic Image-to-Image Generation
@@ -88,7 +88,7 @@ output = pipe(
     prompt=prompt,
     negative_prompt=negative_prompt,
     guidance_scale=3.5,
-).image[0]
+).images[0]
 ```
 
 

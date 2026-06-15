@@ -54,7 +54,7 @@ Kandinsky 5.0 T2V Lite:
 ### Basic Text-to-Video Generation
 
 #### Pro
-**⚠️ Warning!** all Pro models should be infered with pipeline.enable_model_cpu_offload()  
+**⚠️ Warning!** all Pro models should be infered with `pipe.enable_model_cpu_offload()`
 ```python
 import torch
 from diffusers import Kandinsky5T2VPipeline
@@ -65,9 +65,9 @@ model_id = "kandinskylab/Kandinsky-5.0-T2V-Pro-sft-5s-Diffusers"
 pipe = Kandinsky5T2VPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
 
 pipe = pipe.to("cuda")
-pipeline.transformer.set_attention_backend("flex")                            # <--- Set attention bakend to Flex
-pipeline.enable_model_cpu_offload()                                           # <--- Enable cpu offloading for single GPU inference
-pipeline.transformer.compile(mode="max-autotune-no-cudagraphs", dynamic=True) # <--- Compile with max-autotune-no-cudagraphs
+pipe.transformer.set_attention_backend("flex")                                # <--- Set attention bakend to Flex
+pipe.enable_model_cpu_offload()                                               # <--- Enable cpu offloading for single GPU inference
+pipe.transformer.compile(mode="max-autotune-no-cudagraphs", dynamic=True)     # <--- Compile with max-autotune-no-cudagraphs
 
 # Generate video
 prompt = "A cat and a dog baking a cake together in a kitchen."
@@ -167,20 +167,20 @@ export_to_video(output, "output.mp4", fps=24, quality=9)
 
 
 ### Basic Image-to-Video Generation
-**⚠️ Warning!** all Pro models should be infered with pipeline.enable_model_cpu_offload()  
+**⚠️ Warning!** all Pro models should be infered with `pipe.enable_model_cpu_offload()`
 ```python
 import torch
-from diffusers import Kandinsky5T2VPipeline
-from diffusers.utils import export_to_video
+from diffusers import Kandinsky5I2VPipeline
+from diffusers.utils import export_to_video, load_image
 
 # Load the pipeline
 model_id = "kandinskylab/Kandinsky-5.0-I2V-Pro-sft-5s-Diffusers"
-pipe = Kandinsky5T2VPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+pipe = Kandinsky5I2VPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
 
 pipe = pipe.to("cuda")
-pipeline.transformer.set_attention_backend("flex")                            # <--- Set attention bakend to Flex
-pipeline.enable_model_cpu_offload()                                           # <--- Enable cpu offloading for single GPU inference
-pipeline.transformer.compile(mode="max-autotune-no-cudagraphs", dynamic=True) # <--- Compile with max-autotune-no-cudagraphs
+pipe.transformer.set_attention_backend("flex")                                # <--- Set attention bakend to Flex
+pipe.enable_model_cpu_offload()                                               # <--- Enable cpu offloading for single GPU inference
+pipe.transformer.compile(mode="max-autotune-no-cudagraphs", dynamic=True)     # <--- Compile with max-autotune-no-cudagraphs
 
 # Generate video
 image = load_image(
@@ -194,6 +194,7 @@ prompt = "An funny furry creture smiles happily and holds a sign that says 'Kand
 negative_prompt = ""
 
 output = pipe(
+    image=image,
     prompt=prompt,
     negative_prompt=negative_prompt,
     height=height,

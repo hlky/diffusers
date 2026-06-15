@@ -307,9 +307,10 @@ class Kandinsky5AttnProcessor:
         key = attn.key_norm(key.float()).type_as(key)
 
         def apply_rotary(x, rope):
+            output_dtype = x.dtype
             x_ = x.reshape(*x.shape[:-1], -1, 1, 2).to(torch.float32)
             x_out = (rope * x_).sum(dim=-1)
-            return x_out.reshape(*x.shape).to(torch.bfloat16)
+            return x_out.reshape(*x.shape).to(output_dtype)
 
         if rotary_emb is not None:
             query = apply_rotary(query, rotary_emb).type_as(query)
@@ -523,6 +524,10 @@ class Kandinsky5Transformer3DModel(
         "Kandinsky5TransformerEncoderBlock",
         "Kandinsky5TransformerDecoderBlock",
     ]
+    _no_split_modules = [
+        "Kandinsky5TransformerEncoderBlock",
+        "Kandinsky5TransformerDecoderBlock",
+    ]
     _keep_in_fp32_modules = ["time_embeddings", "modulation", "visual_modulation", "text_modulation"]
     _supports_gradient_checkpointing = True
 
@@ -601,7 +606,7 @@ class Kandinsky5Transformer3DModel(
         scale_factor: tuple[float, float, float] = (1.0, 1.0, 1.0),
         sparse_params: dict[str, Any] | None = None,
         return_dict: bool = True,
-    ) -> Transformer2DModelOutput | torch.FloatTensor:
+    ) -> Transformer2DModelOutput | tuple[torch.FloatTensor]:
         """
         Forward pass of the Kandinsky5 3D Transformer.
 
@@ -614,10 +619,11 @@ class Kandinsky5Transformer3DModel(
             text_rope_pos (`torch.LongTensor`): Position for text RoPE
             scale_factor (`tuple[float, float, float]`, optional): Scale factor for RoPE
             sparse_params (`dict[str, Any]`, optional): Parameters for sparse attention
-            return_dict (`bool`, optional): Whether to return a dictionary
+            return_dict (`bool`, optional): Whether to return a [`~models.transformer_2d.Transformer2DModelOutput`].
 
         Returns:
-            [`~models.transformer_2d.Transformer2DModelOutput`] or `torch.FloatTensor`: The output of the transformer
+            [`~models.transformer_2d.Transformer2DModelOutput`] or `tuple[torch.FloatTensor]`:
+                The denoised visual states. When `return_dict` is `False`, a one-element tuple is returned.
         """
         x = hidden_states
         text_embed = encoder_hidden_states
@@ -663,6 +669,6 @@ class Kandinsky5Transformer3DModel(
         x = self.out_layer(visual_embed, text_embed, time_embed)
 
         if not return_dict:
-            return x
+            return (x,)
 
         return Transformer2DModelOutput(sample=x)

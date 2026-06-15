@@ -16,6 +16,7 @@ import html
 from typing import Callable
 
 import numpy as np
+import PIL.Image
 import regex as re
 import torch
 from torch.nn import functional as F
@@ -36,8 +37,7 @@ from ...utils import (
     replace_example_docstring,
 )
 from ...utils.torch_utils import randn_tensor
-from ..pipeline_utils import DiffusionPipeline
-from .pipeline_output import KandinskyImagePipelineOutput
+from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
 
 if is_torch_xla_available():
@@ -61,6 +61,7 @@ EXAMPLE_DOC_STRING = """
         ```python
         >>> import torch
         >>> from diffusers import Kandinsky5I2IPipeline
+        >>> from diffusers.utils import load_image
 
         >>> # Available models:
         >>> # kandinskylab/Kandinsky-5.0-I2I-Lite-sft-Diffusers
@@ -69,17 +70,21 @@ EXAMPLE_DOC_STRING = """
         >>> model_id = "kandinskylab/Kandinsky-5.0-I2I-Lite-sft-Diffusers"
         >>> pipe = Kandinsky5I2IPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
         >>> pipe = pipe.to("cuda")
+        >>> image = load_image(
+        ...     "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/astronaut.jpg"
+        ... )
 
         >>> prompt = "A cat and a dog baking a cake together in a kitchen."
 
         >>> output = pipe(
+        ...     image=image,
         ...     prompt=prompt,
         ...     negative_prompt="",
         ...     height=1024,
         ...     width=1024,
         ...     num_inference_steps=50,
         ...     guidance_scale=3.5,
-        ... ).frames[0]
+        ... ).images[0]
         ```
 """
 
@@ -207,8 +212,25 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         """
         device = device or self._execution_device
         dtype = dtype or self.text_encoder.dtype
-        if not isinstance(image, list):
+
+        if isinstance(image, PIL.Image.Image):
             image = [image]
+        elif isinstance(image, torch.Tensor):
+            image = image.unsqueeze(0) if image.ndim == 3 else image
+            image = self.image_processor.numpy_to_pil(self.image_processor.pt_to_numpy(image))
+        elif isinstance(image, np.ndarray):
+            image = self.image_processor.numpy_to_pil(image)
+        else:
+            qwen_images = []
+            for image_item in image:
+                if isinstance(image_item, PIL.Image.Image):
+                    qwen_images.append(image_item)
+                elif isinstance(image_item, torch.Tensor):
+                    image_item = image_item.unsqueeze(0) if image_item.ndim == 3 else image_item
+                    qwen_images.extend(self.image_processor.numpy_to_pil(self.image_processor.pt_to_numpy(image_item)))
+                else:
+                    qwen_images.extend(self.image_processor.numpy_to_pil(image_item))
+            image = qwen_images
         image = [i.resize((i.size[0] // 2, i.size[1] // 2)) for i in image]
         full_texts = [self.prompt_template.format(p) for p in prompt]
         max_allowed_len = self.prompt_template_encode_start_idx + max_sequence_length
@@ -544,6 +566,12 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
 
             # Reshape to match latent dimensions [batch, 1, height, width, channels]
             image_latents = image_latents.permute(0, 2, 3, 4, 1)  # [batch, 1, H, W, C]
+            if image_latents.shape[0] != batch_size:
+                if batch_size % image_latents.shape[0] != 0:
+                    raise ValueError(
+                        f"`image` batch size {image_latents.shape[0]} must divide the effective batch size {batch_size}."
+                    )
+                image_latents = image_latents.repeat_interleave(batch_size // image_latents.shape[0], dim=0)
             latents = torch.cat([latents, image_latents, torch.ones_like(latents[..., :1])], -1)
 
         return latents
@@ -629,7 +657,7 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generated image.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`KandinskyImagePipelineOutput`].
+                Whether or not to return a [`~pipelines.ImagePipelineOutput`].
             callback_on_step_end (`Callable`, `PipelineCallback`, `MultiPipelineCallbacks`, *optional*):
                 A function that is called at the end of each denoising step.
             callback_on_step_end_tensor_inputs (`List`, *optional*):
@@ -640,15 +668,23 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         Examples:
 
         Returns:
-            [`~KandinskyImagePipelineOutput`] or `tuple`:
-                If `return_dict` is `True`, [`KandinskyImagePipelineOutput`] is returned, otherwise a `tuple` is
+            [`~pipelines.ImagePipelineOutput`] or `tuple`:
+                If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
                 returned where the first element is a list with the generated images.
         """
         if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
             callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
         # 1. Check inputs. Raise error if not correct
-        if height is None and width is None:
-            width, height = image[0].size if isinstance(image, list) else image.size
+        if height is None or width is None:
+            image_for_size = image[0] if isinstance(image, list) else image
+            if isinstance(image_for_size, torch.Tensor) and image_for_size.ndim == 3:
+                default_height, default_width = image_for_size.shape[-2:]
+                default_height = default_height - default_height % self.vae_scale_factor_spatial
+                default_width = default_width - default_width % self.vae_scale_factor_spatial
+            else:
+                default_height, default_width = self.image_processor.get_default_height_width(image_for_size)
+            height = height or default_height
+            width = width or default_width
         self.check_inputs(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -694,16 +730,35 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
                 device=device,
                 dtype=dtype,
             )
+        else:
+            prompt_embeds_qwen = prompt_embeds_qwen.to(device=device, dtype=dtype)
+            prompt_embeds_clip = prompt_embeds_clip.to(device=device, dtype=dtype)
+            prompt_cu_seqlens = prompt_cu_seqlens.to(device=device, dtype=torch.int32)
+
+            original_lengths = prompt_cu_seqlens.diff()
+            prompt_embeds_qwen = prompt_embeds_qwen.repeat(1, num_images_per_prompt, 1)
+            prompt_embeds_qwen = prompt_embeds_qwen.view(
+                batch_size * num_images_per_prompt, -1, prompt_embeds_qwen.shape[-1]
+            )
+            prompt_embeds_clip = prompt_embeds_clip.repeat(1, num_images_per_prompt, 1)
+            prompt_embeds_clip = prompt_embeds_clip.view(batch_size * num_images_per_prompt, -1)
+            prompt_cu_seqlens = torch.cat(
+                [
+                    torch.tensor([0], device=device, dtype=torch.int32),
+                    original_lengths.repeat_interleave(num_images_per_prompt).cumsum(0),
+                ]
+            )
 
         if self.guidance_scale > 1.0:
             if negative_prompt is None:
                 negative_prompt = ""
 
+            negative_batch_size = batch_size
             if isinstance(negative_prompt, str):
-                negative_prompt = [negative_prompt] * len(prompt) if prompt is not None else [negative_prompt]
-            elif len(negative_prompt) != len(prompt):
+                negative_prompt = [negative_prompt] * negative_batch_size
+            elif len(negative_prompt) != negative_batch_size:
                 raise ValueError(
-                    f"`negative_prompt` must have same length as `prompt`. Got {len(negative_prompt)} vs {len(prompt)}."
+                    f"`negative_prompt` must have same batch size as `prompt`. Got {len(negative_prompt)} vs {negative_batch_size}."
                 )
 
             if negative_prompt_embeds_qwen is None:
@@ -716,6 +771,24 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
                         device=device,
                         dtype=dtype,
                     )
+                )
+            else:
+                negative_prompt_embeds_qwen = negative_prompt_embeds_qwen.to(device=device, dtype=dtype)
+                negative_prompt_embeds_clip = negative_prompt_embeds_clip.to(device=device, dtype=dtype)
+                negative_prompt_cu_seqlens = negative_prompt_cu_seqlens.to(device=device, dtype=torch.int32)
+
+                original_lengths = negative_prompt_cu_seqlens.diff()
+                negative_prompt_embeds_qwen = negative_prompt_embeds_qwen.repeat(1, num_images_per_prompt, 1)
+                negative_prompt_embeds_qwen = negative_prompt_embeds_qwen.view(
+                    batch_size * num_images_per_prompt, -1, negative_prompt_embeds_qwen.shape[-1]
+                )
+                negative_prompt_embeds_clip = negative_prompt_embeds_clip.repeat(1, num_images_per_prompt, 1)
+                negative_prompt_embeds_clip = negative_prompt_embeds_clip.view(batch_size * num_images_per_prompt, -1)
+                negative_prompt_cu_seqlens = torch.cat(
+                    [
+                        torch.tensor([0], device=device, dtype=torch.int32),
+                        original_lengths.repeat_interleave(num_images_per_prompt).cumsum(0),
+                    ]
                 )
 
         # 4. Prepare timesteps
@@ -858,4 +931,4 @@ class Kandinsky5I2IPipeline(DiffusionPipeline, KandinskyLoraLoaderMixin):
         if not return_dict:
             return (image,)
 
-        return KandinskyImagePipelineOutput(image=image)
+        return ImagePipelineOutput(images=image)

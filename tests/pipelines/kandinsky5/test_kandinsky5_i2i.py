@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import unittest
 
 import torch
@@ -31,7 +32,13 @@ from diffusers import (
     Kandinsky5I2IPipeline,
     Kandinsky5Transformer3DModel,
 )
-from diffusers.utils.testing_utils import enable_full_determinism
+from diffusers.utils.testing_utils import (
+    backend_empty_cache,
+    enable_full_determinism,
+    require_torch_accelerator,
+    slow,
+    torch_device,
+)
 
 from ..test_pipelines_common import PipelineTesterMixin
 
@@ -188,9 +195,42 @@ class Kandinsky5I2IPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
 
         inputs = self.get_dummy_inputs(device)
         output = pipe(**inputs)
-        image = output.image
+        image = output.images
 
         self.assertEqual(image.shape, (1, 3, 64, 64))
+
+    def test_precomputed_prompt_embeds_batching_with_tensor_image(self):
+        device = "cpu"
+        components = self.get_dummy_components()
+        pipe = self.pipeline_class(**components)
+        pipe.resolutions = [(64, 64)]
+        pipe.to(device)
+        pipe.set_progress_bar_config(disable=None)
+
+        batch_size = 2
+        sequence_length = 4
+        prompt_embeds_qwen = torch.zeros(batch_size, sequence_length, components["transformer"].config.in_text_dim)
+        prompt_embeds_clip = torch.zeros(batch_size, components["transformer"].config.in_text_dim2)
+        prompt_cu_seqlens = torch.tensor([0, sequence_length, 2 * sequence_length], dtype=torch.int32)
+
+        output = pipe(
+            image=torch.zeros(1, 3, 64, 64),
+            prompt=None,
+            prompt_embeds_qwen=prompt_embeds_qwen,
+            prompt_embeds_clip=prompt_embeds_clip,
+            prompt_cu_seqlens=prompt_cu_seqlens,
+            negative_prompt_embeds_qwen=prompt_embeds_qwen,
+            negative_prompt_embeds_clip=prompt_embeds_clip,
+            negative_prompt_cu_seqlens=prompt_cu_seqlens,
+            height=64,
+            width=64,
+            guidance_scale=4.0,
+            num_images_per_prompt=2,
+            num_inference_steps=1,
+            output_type="latent",
+        )
+
+        self.assertEqual(output.images.shape[0], batch_size * 2)
 
     @unittest.skip("TODO: Test does not work")
     def test_encode_prompt_works_in_isolation(self):
@@ -211,3 +251,37 @@ class Kandinsky5I2IPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
     @unittest.skip("TODO: revisit, not working")
     def test_float16_inference(self):
         pass
+
+
+@slow
+@require_torch_accelerator
+class Kandinsky5I2IPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def tearDown(self):
+        super().tearDown()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def test_kandinsky5_i2i_lite_sft(self):
+        pipe = Kandinsky5I2IPipeline.from_pretrained(
+            "kandinskylab/Kandinsky-5.0-I2I-Lite-sft-Diffusers", torch_dtype=torch.bfloat16
+        )
+        pipe.enable_model_cpu_offload(device=torch_device)
+        pipe.set_progress_bar_config(disable=None)
+
+        output = pipe(
+            image=Image.new("RGB", (1024, 1024), color="red"),
+            prompt="Turn the red square into a clean studio product photo",
+            negative_prompt="",
+            height=1024,
+            width=1024,
+            num_inference_steps=1,
+            guidance_scale=3.5,
+            output_type="latent",
+        )
+
+        self.assertEqual(output.images.shape[0], 1)
