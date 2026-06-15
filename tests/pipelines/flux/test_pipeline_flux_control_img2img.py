@@ -1,7 +1,9 @@
+import gc
 import unittest
 
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoConfig, AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
 
@@ -12,7 +14,7 @@ from diffusers import (
     FluxTransformer2DModel,
 )
 
-from ...testing_utils import enable_full_determinism, torch_device
+from ...testing_utils import backend_empty_cache, enable_full_determinism, require_big_accelerator, slow, torch_device
 from ..test_pipelines_common import PipelineTesterMixin
 
 
@@ -143,3 +145,71 @@ class FluxControlImg2ImgPipelineFastTests(unittest.TestCase, PipelineTesterMixin
             image = pipe(**inputs).images[0]
             output_height, output_width, _ = image.shape
             assert (output_height, output_width) == (expected_height, expected_width)
+
+    def test_height_width_warning_uses_double_vae_scale_factor(self):
+        pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)
+
+        with unittest.mock.patch.object(pipe.check_inputs.__globals__["logger"], "warning") as warning:
+            pipe.check_inputs(
+                prompt="A painting of a squirrel eating a burger",
+                prompt_2=None,
+                strength=0.8,
+                height=pipe.vae_scale_factor,
+                width=pipe.vae_scale_factor,
+                callback_on_step_end_tensor_inputs=None,
+            )
+
+        warning.assert_called_once()
+
+
+@slow
+@require_big_accelerator
+class FluxControlImg2ImgPipelineSlowTests(unittest.TestCase):
+    pipeline_class = FluxControlImg2ImgPipeline
+    repo_id = "black-forest-labs/FLUX.1-Canny-dev"
+
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def tearDown(self):
+        super().tearDown()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def get_inputs(self, seed=0):
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        prompt_embeds = torch.load(
+            hf_hub_download(repo_id="diffusers/test-slices", repo_type="dataset", filename="flux/prompt_embeds.pt")
+        ).to(torch_device)
+        pooled_prompt_embeds = torch.load(
+            hf_hub_download(
+                repo_id="diffusers/test-slices", repo_type="dataset", filename="flux/pooled_prompt_embeds.pt"
+            )
+        ).to(torch_device)
+        return {
+            "image": Image.new("RGB", (512, 512), 0),
+            "control_image": Image.new("RGB", (512, 512), 0),
+            "prompt_embeds": prompt_embeds,
+            "pooled_prompt_embeds": pooled_prompt_embeds,
+            "num_inference_steps": 2,
+            "guidance_scale": 0.0,
+            "max_sequence_length": 256,
+            "height": 512,
+            "width": 512,
+            "strength": 0.5,
+            "output_type": "np",
+            "generator": generator,
+        }
+
+    def test_flux_control_img2img_inference(self):
+        pipe = self.pipeline_class.from_pretrained(
+            self.repo_id, torch_dtype=torch.bfloat16, text_encoder=None, text_encoder_2=None
+        ).to(torch_device)
+
+        image = pipe(**self.get_inputs()).images[0]
+
+        self.assertEqual(image.shape, (512, 512, 3))
+        self.assertTrue(np.isfinite(image).all())
+        self.assertGreater(float(np.abs(image).sum()), 0.0)

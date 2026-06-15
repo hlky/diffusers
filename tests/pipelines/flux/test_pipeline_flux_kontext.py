@@ -1,8 +1,10 @@
+import gc
 import unittest
 
 import numpy as np
 import PIL.Image
 import torch
+from huggingface_hub import hf_hub_download
 from transformers import AutoConfig, AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
 
 from diffusers import (
@@ -13,7 +15,7 @@ from diffusers import (
     FluxTransformer2DModel,
 )
 
-from ...testing_utils import torch_device
+from ...testing_utils import backend_empty_cache, require_big_accelerator, slow, torch_device
 from ..test_pipelines_common import (
     FasterCacheTesterMixin,
     FluxIPAdapterTesterMixin,
@@ -176,3 +178,75 @@ class FluxKontextPipelineFastTests(
         inputs["true_cfg_scale"] = 2.0
         true_cfg_out = pipe(**inputs, generator=torch.manual_seed(0)).images[0]
         assert not np.allclose(no_true_cfg_out, true_cfg_out)
+
+    def test_negative_prompt_embeds_shape_validation(self):
+        pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)
+        prompt_embeds = torch.zeros((1, 48, 32), device=torch_device)
+        pooled_prompt_embeds = torch.zeros((1, 32), device=torch_device)
+        negative_prompt_embeds = torch.zeros((1, 47, 32), device=torch_device)
+        negative_pooled_prompt_embeds = torch.zeros((1, 32), device=torch_device)
+
+        with self.assertRaisesRegex(ValueError, "must have the same shape"):
+            pipe.check_inputs(
+                prompt=None,
+                prompt_2=None,
+                height=8,
+                width=8,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            )
+
+
+@slow
+@require_big_accelerator
+class FluxKontextPipelineSlowTests(unittest.TestCase):
+    pipeline_class = FluxKontextPipeline
+    repo_id = "black-forest-labs/FLUX.1-Kontext-dev"
+
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def tearDown(self):
+        super().tearDown()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def get_inputs(self, seed=0):
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        prompt_embeds = torch.load(
+            hf_hub_download(repo_id="diffusers/test-slices", repo_type="dataset", filename="flux/prompt_embeds.pt")
+        ).to(torch_device)
+        pooled_prompt_embeds = torch.load(
+            hf_hub_download(
+                repo_id="diffusers/test-slices", repo_type="dataset", filename="flux/pooled_prompt_embeds.pt"
+            )
+        ).to(torch_device)
+        return {
+            "image": PIL.Image.new("RGB", (512, 512), 0),
+            "prompt_embeds": prompt_embeds,
+            "pooled_prompt_embeds": pooled_prompt_embeds,
+            "num_inference_steps": 2,
+            "guidance_scale": 0.0,
+            "max_sequence_length": 256,
+            "height": 512,
+            "width": 512,
+            "max_area": 512 * 512,
+            "_auto_resize": False,
+            "output_type": "np",
+            "generator": generator,
+        }
+
+    def test_flux_kontext_inference(self):
+        pipe = self.pipeline_class.from_pretrained(
+            self.repo_id, torch_dtype=torch.bfloat16, text_encoder=None, text_encoder_2=None
+        ).to(torch_device)
+
+        image = pipe(**self.get_inputs()).images[0]
+
+        self.assertEqual(image.shape, (512, 512, 3))
+        self.assertTrue(np.isfinite(image).all())
+        self.assertGreater(float(np.abs(image).sum()), 0.0)

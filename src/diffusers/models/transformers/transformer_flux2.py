@@ -26,7 +26,7 @@ from ...utils import BaseOutput, apply_lora_scale, logging
 from ...utils.torch_utils import maybe_adjust_dtype_for_device
 from .._modeling_parallel import ContextParallelInput, ContextParallelOutput
 from ..attention import AttentionMixin, AttentionModuleMixin
-from ..attention_dispatch import dispatch_attention_fn
+from ..attention_dispatch import AttentionBackendName, dispatch_attention_fn
 from ..cache_utils import CacheMixin
 from ..embeddings import (
     TimestepEmbedding,
@@ -39,6 +39,11 @@ from ..normalization import AdaLayerNormContinuous
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+
+
+Flux2AttentionProjections = tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+]
 
 
 @dataclass
@@ -116,7 +121,7 @@ def _flux2_kv_causal_attention(
     num_txt_tokens: int,
     num_ref_tokens: int,
     kv_cache: Flux2KVLayerCache | None = None,
-    backend=None,
+    backend: AttentionBackendName | None = None,
 ) -> torch.Tensor:
     """Causal attention for KV caching where reference tokens only self-attend.
 
@@ -251,7 +256,9 @@ def _blend_single_block_mods(
     return torch.cat(blended, dim=-1)
 
 
-def _get_projections(attn: "Flux2Attention", hidden_states, encoder_hidden_states=None):
+def _get_projections(
+    attn: "Flux2Attention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None = None
+) -> Flux2AttentionProjections:
     query = attn.to_q(hidden_states)
     key = attn.to_k(hidden_states)
     value = attn.to_v(hidden_states)
@@ -265,17 +272,21 @@ def _get_projections(attn: "Flux2Attention", hidden_states, encoder_hidden_state
     return query, key, value, encoder_query, encoder_key, encoder_value
 
 
-def _get_fused_projections(attn: "Flux2Attention", hidden_states, encoder_hidden_states=None):
+def _get_fused_projections(
+    attn: "Flux2Attention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None = None
+) -> Flux2AttentionProjections:
     query, key, value = attn.to_qkv(hidden_states).chunk(3, dim=-1)
 
-    encoder_query = encoder_key = encoder_value = (None,)
+    encoder_query = encoder_key = encoder_value = None
     if encoder_hidden_states is not None and hasattr(attn, "to_added_qkv"):
         encoder_query, encoder_key, encoder_value = attn.to_added_qkv(encoder_hidden_states).chunk(3, dim=-1)
 
     return query, key, value, encoder_query, encoder_key, encoder_value
 
 
-def _get_qkv_projections(attn: "Flux2Attention", hidden_states, encoder_hidden_states=None):
+def _get_qkv_projections(
+    attn: "Flux2Attention", hidden_states: torch.Tensor, encoder_hidden_states: torch.Tensor | None = None
+) -> Flux2AttentionProjections:
     if attn.fused_projections:
         return _get_fused_projections(attn, hidden_states, encoder_hidden_states)
     return _get_projections(attn, hidden_states, encoder_hidden_states)
@@ -506,10 +517,10 @@ class Flux2Attention(torch.nn.Module, AttentionModuleMixin):
         added_proj_bias: bool | None = True,
         out_bias: bool = True,
         eps: float = 1e-5,
-        out_dim: int = None,
+        out_dim: int | None = None,
         elementwise_affine: bool = True,
-        processor=None,
-    ):
+        processor: Flux2AttnProcessor | Flux2KVAttnProcessor | None = None,
+    ) -> None:
         super().__init__()
 
         self.head_dim = dim_head
@@ -729,12 +740,12 @@ class Flux2ParallelSelfAttention(torch.nn.Module, AttentionModuleMixin):
         bias: bool = False,
         out_bias: bool = True,
         eps: float = 1e-5,
-        out_dim: int = None,
+        out_dim: int | None = None,
         elementwise_affine: bool = True,
         mlp_ratio: float = 4.0,
         mlp_mult_factor: int = 2,
-        processor=None,
-    ):
+        processor: Flux2ParallelSelfAttnProcessor | Flux2KVParallelSelfAttnProcessor | None = None,
+    ) -> None:
         super().__init__()
 
         self.head_dim = dim_head

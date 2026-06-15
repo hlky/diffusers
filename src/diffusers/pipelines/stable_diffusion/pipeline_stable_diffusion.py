@@ -25,6 +25,7 @@ from ...loaders import FromSingleFileMixin, IPAdapterMixin, StableDiffusionLoraL
 from ...models import AutoencoderKL, ImageProjection, UNet2DConditionModel
 from ...models.lora import adjust_lora_scale_text_encoder
 from ...schedulers import KarrasDiffusionSchedulers
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import (
     USE_PEFT_BACKEND,
     deprecate,
@@ -93,13 +94,13 @@ def rescale_noise_cfg(noise_cfg, noise_pred_text, guidance_rescale=0.0):
 
 
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.

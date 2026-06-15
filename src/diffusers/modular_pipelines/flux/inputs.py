@@ -15,14 +15,11 @@
 
 import torch
 
-from ...pipelines import FluxPipeline
 from ...utils import logging
-from ..modular_pipeline import ModularPipelineBlocks, PipelineState
+from ..modular_pipeline import BlockState, ModularPipelineBlocks, PipelineState
 from ..modular_pipeline_utils import InputParam, OutputParam
-
-# TODO: consider making these common utilities for modular if they are not pipeline-specific.
-from ..qwenimage.inputs import calculate_dimension_from_latents, repeat_tensor_to_batch_size
 from .modular_pipeline import FluxModularPipeline
+from .utils import calculate_dimension_from_latents, pack_latents, repeat_tensor_to_batch_size
 
 
 logger = logging.get_logger(__name__)
@@ -43,13 +40,11 @@ class FluxTextInputStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("num_images_per_prompt", default=1),
-            InputParam(
+            InputParam.template("num_images_per_prompt"),
+            InputParam.template(
                 "prompt_embeds",
-                required=True,
                 kwargs_type="denoiser_input_fields",
-                type_hint=torch.Tensor,
-                description="Pre-generated text embeddings. Can be generated from text_encoder step.",
+                description="Pre-generated text embeddings. Can be generated from the text encoder step.",
             ),
             InputParam(
                 "pooled_prompt_embeds",
@@ -88,7 +83,7 @@ class FluxTextInputStep(ModularPipelineBlocks):
             # TODO: support negative embeddings?
         ]
 
-    def check_inputs(self, components, block_state):
+    def check_inputs(self, components: FluxModularPipeline, block_state: BlockState) -> None:
         if block_state.prompt_embeds is not None and block_state.pooled_prompt_embeds is not None:
             if block_state.prompt_embeds.shape[0] != block_state.pooled_prompt_embeds.shape[0]:
                 raise ValueError(
@@ -128,7 +123,7 @@ class FluxAdditionalInputsStep(ModularPipelineBlocks):
         self,
         image_latent_inputs: list[str] = ["image_latents"],
         additional_batch_inputs: list[str] = [],
-    ):
+    ) -> None:
         if not isinstance(image_latent_inputs, list):
             image_latent_inputs = [image_latent_inputs]
         if not isinstance(additional_batch_inputs, list):
@@ -164,19 +159,31 @@ class FluxAdditionalInputsStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         inputs = [
-            InputParam(name="num_images_per_prompt", default=1),
-            InputParam(name="batch_size", required=True),
-            InputParam(name="height"),
-            InputParam(name="width"),
+            InputParam.template("num_images_per_prompt"),
+            InputParam.template("batch_size", required=True),
+            InputParam.template("height", required=False),
+            InputParam.template("width", required=False),
         ]
 
         # Add image latent inputs
         for image_latent_input_name in self._image_latent_inputs:
-            inputs.append(InputParam(name=image_latent_input_name))
+            inputs.append(
+                InputParam(
+                    name=image_latent_input_name,
+                    type_hint=torch.Tensor | None,
+                    description=f"Optional latent input `{image_latent_input_name}` to patchify and batch-expand.",
+                )
+            )
 
         # Add additional batch inputs
         for input_name in self._additional_batch_inputs:
-            inputs.append(InputParam(name=input_name))
+            inputs.append(
+                InputParam(
+                    name=input_name,
+                    type_hint=torch.Tensor | None,
+                    description=f"Optional tensor input `{input_name}` to batch-expand with the text inputs.",
+                )
+            )
 
         return inputs
 
@@ -209,7 +216,7 @@ class FluxAdditionalInputsStep(ModularPipelineBlocks):
             # 2. Patchify the image latent tensor
             # TODO: Implement patchifier for Flux.
             latent_height, latent_width = image_latent_tensor.shape[2:]
-            image_latent_tensor = FluxPipeline._pack_latents(
+            image_latent_tensor = pack_latents(
                 image_latent_tensor, block_state.batch_size, image_latent_tensor.shape[1], latent_height, latent_width
             )
 
@@ -266,7 +273,7 @@ class FluxKontextAdditionalInputsStep(FluxAdditionalInputsStep):
             # 2. Patchify the image latent tensor
             # TODO: Implement patchifier for Flux.
             latent_height, latent_width = image_latent_tensor.shape[2:]
-            image_latent_tensor = FluxPipeline._pack_latents(
+            image_latent_tensor = pack_latents(
                 image_latent_tensor, block_state.batch_size, image_latent_tensor.shape[1], latent_height, latent_width
             )
 
@@ -304,7 +311,7 @@ class FluxKontextSetResolutionStep(ModularPipelineBlocks):
     model_name = "flux-kontext"
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Determines the height and width to be used during the subsequent computations.\n"
             "It should always be placed _before_ the latent preparation step."
@@ -313,9 +320,14 @@ class FluxKontextSetResolutionStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         inputs = [
-            InputParam(name="height"),
-            InputParam(name="width"),
-            InputParam(name="max_area", type_hint=int, default=1024**2),
+            InputParam.template("height", required=False),
+            InputParam.template("width", required=False),
+            InputParam(
+                name="max_area",
+                type_hint=int,
+                default=1024**2,
+                description="Maximum pixel area to fit the generated resolution within while preserving aspect ratio.",
+            ),
         ]
         return inputs
 
@@ -327,7 +339,7 @@ class FluxKontextSetResolutionStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(height, width, vae_scale_factor):
+    def check_inputs(height: int | None, width: int | None, vae_scale_factor: int) -> None:
         if height is not None and height % (vae_scale_factor * 2) != 0:
             raise ValueError(f"Height must be divisible by {vae_scale_factor * 2} but is {height}")
 

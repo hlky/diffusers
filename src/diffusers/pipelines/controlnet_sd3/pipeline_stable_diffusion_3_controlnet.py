@@ -31,6 +31,7 @@ from ...models.autoencoders import AutoencoderKL
 from ...models.controlnets.controlnet_sd3 import SD3ControlNetModel, SD3MultiControlNetModel
 from ...models.transformers import SD3Transformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import (
     USE_PEFT_BACKEND,
     is_torch_xla_available,
@@ -82,13 +83,13 @@ EXAMPLE_DOC_STRING = """
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -679,16 +680,16 @@ class StableDiffusion3ControlNetPipeline(
 
     def prepare_image(
         self,
-        image,
-        width,
-        height,
-        batch_size,
-        num_images_per_prompt,
-        device,
-        dtype,
-        do_classifier_free_guidance=False,
-        guess_mode=False,
-    ):
+        image: PipelineImageInput,
+        width: int,
+        height: int,
+        batch_size: int,
+        num_images_per_prompt: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        do_classifier_free_guidance: bool = False,
+        guess_mode: bool = False,
+    ) -> torch.Tensor:
         if isinstance(image, torch.Tensor):
             pass
         else:

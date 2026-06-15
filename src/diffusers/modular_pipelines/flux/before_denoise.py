@@ -17,13 +17,15 @@ import inspect
 import numpy as np
 import torch
 
-from ...pipelines import FluxPipeline
+from ...models import FluxTransformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import logging
 from ...utils.torch_utils import randn_tensor
-from ..modular_pipeline import ModularPipelineBlocks, PipelineState
+from ..modular_pipeline import BlockState, ModularPipelineBlocks, PipelineState
 from ..modular_pipeline_utils import ComponentSpec, InputParam, OutputParam
 from .modular_pipeline import FluxModularPipeline
+from .utils import pack_latents, prepare_latent_image_ids
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -31,13 +33,13 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -91,12 +93,12 @@ def retrieve_timesteps(
 
 # Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
 def calculate_shift(
-    image_seq_len,
+    image_seq_len: int,
     base_seq_len: int = 256,
     max_seq_len: int = 4096,
     base_shift: float = 0.5,
     max_shift: float = 1.15,
-):
+) -> float:
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     mu = image_seq_len * m + b
@@ -106,7 +108,7 @@ def calculate_shift(
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -118,17 +120,17 @@ def retrieve_latents(
 
 
 def _get_initial_timesteps_and_optionals(
-    transformer,
-    scheduler,
-    batch_size,
-    height,
-    width,
-    vae_scale_factor,
-    num_inference_steps,
-    guidance_scale,
-    sigmas,
-    device,
-):
+    transformer: FluxTransformer2DModel,
+    scheduler: FlowMatchEulerDiscreteScheduler,
+    batch_size: int,
+    height: int,
+    width: int,
+    vae_scale_factor: int,
+    num_inference_steps: int,
+    guidance_scale: float,
+    sigmas: list[float] | None,
+    device: torch.device,
+) -> tuple[torch.Tensor, int, np.ndarray | list[float] | None, torch.Tensor | None]:
     image_seq_len = (int(height) // vae_scale_factor // 2) * (int(width) // vae_scale_factor // 2)
 
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
@@ -165,20 +167,20 @@ class FluxSetTimestepsStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("num_inference_steps", default=50),
-            InputParam("timesteps"),
-            InputParam("sigmas"),
-            InputParam("guidance_scale", default=3.5),
-            InputParam("latents", type_hint=torch.Tensor),
-            InputParam("num_images_per_prompt", default=1),
-            InputParam("height", type_hint=int),
-            InputParam("width", type_hint=int),
+            InputParam.template("num_inference_steps"),
+            InputParam.template("timesteps", required=False),
+            InputParam.template("sigmas", required=False),
             InputParam(
-                "batch_size",
-                required=True,
-                type_hint=int,
-                description="Number of prompts, the final batch size of model inputs should be `batch_size * num_images_per_prompt`. Can be generated in input step.",
+                "guidance_scale",
+                type_hint=float,
+                default=3.5,
+                description="Guidance scale used to prepare Flux guidance conditioning.",
             ),
+            InputParam.template("latents", required=False),
+            InputParam.template("num_images_per_prompt"),
+            InputParam.template("height", required=False),
+            InputParam.template("width", required=False),
+            InputParam.template("batch_size", required=True),
         ]
 
     @property
@@ -241,20 +243,20 @@ class FluxImg2ImgSetTimestepsStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("num_inference_steps", default=50),
-            InputParam("timesteps"),
-            InputParam("sigmas"),
-            InputParam("strength", default=0.6),
-            InputParam("guidance_scale", default=3.5),
-            InputParam("num_images_per_prompt", default=1),
-            InputParam("height", type_hint=int),
-            InputParam("width", type_hint=int),
+            InputParam.template("num_inference_steps"),
+            InputParam.template("timesteps", required=False),
+            InputParam.template("sigmas", required=False),
+            InputParam.template("strength", default=0.6),
             InputParam(
-                "batch_size",
-                required=True,
-                type_hint=int,
-                description="Number of prompts, the final batch size of model inputs should be `batch_size * num_images_per_prompt`. Can be generated in input step.",
+                "guidance_scale",
+                type_hint=float,
+                default=3.5,
+                description="Guidance scale used to prepare Flux guidance conditioning.",
             ),
+            InputParam.template("num_images_per_prompt"),
+            InputParam.template("height", required=False),
+            InputParam.template("width", required=False),
+            InputParam.template("batch_size", required=True),
         ]
 
     @property
@@ -271,7 +273,9 @@ class FluxImg2ImgSetTimestepsStep(ModularPipelineBlocks):
 
     @staticmethod
     # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps with self.scheduler->scheduler
-    def get_timesteps(scheduler, num_inference_steps, strength, device):
+    def get_timesteps(
+        scheduler: SchedulerMixin, num_inference_steps: int, strength: float, device: torch.device
+    ) -> tuple[torch.Tensor, int]:
         # get the original timestep using init_timestep
         init_timestep = min(num_inference_steps * strength, num_inference_steps)
 
@@ -331,17 +335,12 @@ class FluxPrepareLatentsStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("height", type_hint=int),
-            InputParam("width", type_hint=int),
-            InputParam("latents", type_hint=torch.Tensor | None),
-            InputParam("num_images_per_prompt", type_hint=int, default=1),
-            InputParam("generator"),
-            InputParam(
-                "batch_size",
-                required=True,
-                type_hint=int,
-                description="Number of prompts, the final batch size of model inputs should be `batch_size * num_images_per_prompt`. Can be generated in input step.",
-            ),
+            InputParam.template("height", required=False),
+            InputParam.template("width", required=False),
+            InputParam.template("latents", required=False, type_hint=torch.Tensor | None),
+            InputParam.template("num_images_per_prompt"),
+            InputParam.template("generator", required=False),
+            InputParam.template("batch_size", required=True),
             InputParam("dtype", type_hint=torch.dtype, description="The dtype of the model inputs"),
         ]
 
@@ -354,7 +353,7 @@ class FluxPrepareLatentsStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(components, block_state):
+    def check_inputs(components: FluxModularPipeline, block_state: BlockState) -> None:
         if (block_state.height is not None and block_state.height % (components.vae_scale_factor * 2) != 0) or (
             block_state.width is not None and block_state.width % (components.vae_scale_factor * 2) != 0
         ):
@@ -364,16 +363,16 @@ class FluxPrepareLatentsStep(ModularPipelineBlocks):
 
     @staticmethod
     def prepare_latents(
-        comp,
-        batch_size,
-        num_channels_latents,
-        height,
-        width,
-        dtype,
-        device,
-        generator,
-        latents=None,
-    ):
+        comp: FluxModularPipeline,
+        batch_size: int,
+        num_channels_latents: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        generator: torch.Generator | list[torch.Generator] | None,
+        latents: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         height = 2 * (int(height) // (comp.vae_scale_factor * 2))
         width = 2 * (int(width) // (comp.vae_scale_factor * 2))
 
@@ -390,7 +389,7 @@ class FluxPrepareLatentsStep(ModularPipelineBlocks):
 
         # TODO: move packing latents code to a patchifier similar to Qwen
         latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = FluxPipeline._pack_latents(latents, batch_size, num_channels_latents, height, width)
+        latents = pack_latents(latents, batch_size, num_channels_latents, height, width)
 
         return latents
 
@@ -426,8 +425,10 @@ class FluxImg2ImgPrepareLatentsStep(ModularPipelineBlocks):
 
     @property
     def description(self) -> str:
-        return "Step that adds noise to image latents for image-to-image. Should be run after `set_timesteps`,"
-        " `prepare_latents`. Both noise and image latents should already be patchified."
+        return (
+            "Step that adds noise to image latents for image-to-image. Should be run after `set_timesteps`,"
+            " `prepare_latents`. Both noise and image latents should already be patchified."
+        )
 
     @property
     def expected_components(self) -> list[ComponentSpec]:
@@ -467,7 +468,7 @@ class FluxImg2ImgPrepareLatentsStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(image_latents, latents):
+    def check_inputs(image_latents: torch.Tensor, latents: torch.Tensor) -> None:
         if image_latents.shape[0] != latents.shape[0]:
             raise ValueError(
                 f"`image_latents` must have have same batch size as `latents`, but got {image_latents.shape[0]} and {latents.shape[0]}"
@@ -508,9 +509,9 @@ class FluxRoPEInputsStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam(name="height", required=True),
-            InputParam(name="width", required=True),
-            InputParam(name="prompt_embeds"),
+            InputParam.template("height", required=True),
+            InputParam.template("width", required=True),
+            InputParam.template("prompt_embeds"),
         ]
 
     @property
@@ -541,7 +542,7 @@ class FluxRoPEInputsStep(ModularPipelineBlocks):
 
         height = 2 * (int(block_state.height) // (components.vae_scale_factor * 2))
         width = 2 * (int(block_state.width) // (components.vae_scale_factor * 2))
-        block_state.img_ids = FluxPipeline._prepare_latent_image_ids(None, height // 2, width // 2, device, dtype)
+        block_state.img_ids = prepare_latent_image_ids(None, height // 2, width // 2, device, dtype)
 
         self.set_block_state(state, block_state)
 
@@ -558,11 +559,11 @@ class FluxKontextRoPEInputsStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam(name="image_height"),
-            InputParam(name="image_width"),
-            InputParam(name="height"),
-            InputParam(name="width"),
-            InputParam(name="prompt_embeds"),
+            InputParam(name="image_height", type_hint=int, description="Height of the encoded conditioning image."),
+            InputParam(name="image_width", type_hint=int, description="Width of the encoded conditioning image."),
+            InputParam.template("height", required=True),
+            InputParam.template("width", required=True),
+            InputParam.template("prompt_embeds"),
         ]
 
     @property
@@ -598,15 +599,13 @@ class FluxKontextRoPEInputsStep(ModularPipelineBlocks):
         ):
             image_latent_height = 2 * (int(block_state.image_height) // (components.vae_scale_factor * 2))
             image_latent_width = 2 * (int(block_state.image_width) // (components.vae_scale_factor * 2))
-            img_ids = FluxPipeline._prepare_latent_image_ids(
-                None, image_latent_height // 2, image_latent_width // 2, device, dtype
-            )
+            img_ids = prepare_latent_image_ids(None, image_latent_height // 2, image_latent_width // 2, device, dtype)
             # image ids are the same as latent ids with the first dimension set to 1 instead of 0
             img_ids[..., 0] = 1
 
         height = 2 * (int(block_state.height) // (components.vae_scale_factor * 2))
         width = 2 * (int(block_state.width) // (components.vae_scale_factor * 2))
-        latent_ids = FluxPipeline._prepare_latent_image_ids(None, height // 2, width // 2, device, dtype)
+        latent_ids = prepare_latent_image_ids(None, height // 2, width // 2, device, dtype)
 
         if img_ids is not None:
             latent_ids = torch.cat([latent_ids, img_ids], dim=0)

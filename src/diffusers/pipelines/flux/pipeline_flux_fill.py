@@ -19,11 +19,12 @@ import numpy as np
 import torch
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
 
-from ...image_processor import VaeImageProcessor
+from ...image_processor import PipelineImageInput, VaeImageProcessor
 from ...loaders import FluxLoraLoaderMixin, FromSingleFileMixin, TextualInversionLoaderMixin
 from ...models.autoencoders import AutoencoderKL
 from ...models.transformers import FluxTransformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import (
     USE_PEFT_BACKEND,
     deprecate,
@@ -79,12 +80,12 @@ EXAMPLE_DOC_STRING = """
 
 # Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
 def calculate_shift(
-    image_seq_len,
+    image_seq_len: int,
     base_seq_len: int = 256,
     max_seq_len: int = 4096,
     base_shift: float = 0.5,
     max_shift: float = 1.15,
-):
+) -> float:
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     mu = image_seq_len * m + b
@@ -93,13 +94,13 @@ def calculate_shift(
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -154,7 +155,7 @@ def retrieve_timesteps(
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -338,17 +339,17 @@ class FluxFillPipeline(
 
     def prepare_mask_latents(
         self,
-        mask,
-        masked_image,
-        batch_size,
-        num_channels_latents,
-        num_images_per_prompt,
-        height,
-        width,
-        dtype,
-        device,
-        generator,
-    ):
+        mask: torch.Tensor,
+        masked_image: torch.Tensor,
+        batch_size: int,
+        num_channels_latents: int,
+        num_images_per_prompt: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        generator: torch.Generator | list[torch.Generator],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # 1. calculate the height and width of the latents
         # VAE applies 8x compression on images but we must also account for packing which requires
         # latent height and width to be divisible by 2.
@@ -497,7 +498,9 @@ class FluxFillPipeline(
         return prompt_embeds, pooled_prompt_embeds, text_ids
 
     # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_inpaint.StableDiffusion3InpaintPipeline._encode_vae_image
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+    def _encode_vae_image(
+        self, image: torch.Tensor, generator: torch.Generator | list[torch.Generator]
+    ) -> torch.Tensor:
         if isinstance(generator, list):
             image_latents = [
                 retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i])
@@ -512,7 +515,9 @@ class FluxFillPipeline(
         return image_latents
 
     # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps
-    def get_timesteps(self, num_inference_steps, strength, device):
+    def get_timesteps(
+        self, num_inference_steps: int, strength: float, device: torch.device
+    ) -> tuple[torch.Tensor, int]:
         # get the original timestep using init_timestep
         init_timestep = min(num_inference_steps * strength, num_inference_steps)
 
@@ -525,19 +530,19 @@ class FluxFillPipeline(
 
     def check_inputs(
         self,
-        prompt,
-        prompt_2,
-        strength,
-        height,
-        width,
-        prompt_embeds=None,
-        pooled_prompt_embeds=None,
-        callback_on_step_end_tensor_inputs=None,
-        max_sequence_length=None,
-        image=None,
-        mask_image=None,
-        masked_image_latents=None,
-    ):
+        prompt: str | list[str] | None,
+        prompt_2: str | list[str] | None,
+        strength: float,
+        height: int,
+        width: int,
+        prompt_embeds: torch.Tensor | None = None,
+        pooled_prompt_embeds: torch.Tensor | None = None,
+        callback_on_step_end_tensor_inputs: list[str] | None = None,
+        max_sequence_length: int | None = None,
+        image: PipelineImageInput | None = None,
+        mask_image: PipelineImageInput | None = None,
+        masked_image_latents: torch.Tensor | None = None,
+    ) -> None:
         if strength < 0 or strength > 1:
             raise ValueError(f"The value of strength should in [0.0, 1.0] but is {strength}")
 
@@ -590,7 +595,9 @@ class FluxFillPipeline(
 
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._prepare_latent_image_ids
-    def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
+    def _prepare_latent_image_ids(
+        batch_size: int, height: int, width: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         latent_image_ids = torch.zeros(height, width, 3)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
         latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
@@ -605,7 +612,9 @@ class FluxFillPipeline(
 
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._pack_latents
-    def _pack_latents(latents, batch_size, num_channels_latents, height, width):
+    def _pack_latents(
+        latents: torch.Tensor, batch_size: int, num_channels_latents: int, height: int, width: int
+    ) -> torch.Tensor:
         latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
         latents = latents.permute(0, 2, 4, 1, 3, 5)
         latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
@@ -614,7 +623,7 @@ class FluxFillPipeline(
 
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._unpack_latents
-    def _unpack_latents(latents, height, width, vae_scale_factor):
+    def _unpack_latents(latents: torch.Tensor, height: int, width: int, vae_scale_factor: int) -> torch.Tensor:
         batch_size, num_patches, channels = latents.shape
 
         # VAE applies 8x compression on images but we must also account for packing which requires
@@ -685,17 +694,17 @@ class FluxFillPipeline(
     # Copied from diffusers.pipelines.flux.pipeline_flux_img2img.FluxImg2ImgPipeline.prepare_latents
     def prepare_latents(
         self,
-        image,
-        timestep,
-        batch_size,
-        num_channels_latents,
-        height,
-        width,
-        dtype,
-        device,
-        generator,
-        latents=None,
-    ):
+        image: torch.Tensor,
+        timestep: torch.Tensor,
+        batch_size: int,
+        num_channels_latents: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        generator: torch.Generator | list[torch.Generator] | None,
+        latents: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"

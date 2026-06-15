@@ -27,6 +27,7 @@ from diffusers.modular_pipelines import (
     FluxModularPipeline,
     ModularPipeline,
 )
+from diffusers.modular_pipelines.flux import encoders as flux_encoders
 
 from ...testing_utils import floats_tensor, torch_device
 from ..test_modular_pipelines_common import ModularPipelineTesterMixin
@@ -43,6 +44,12 @@ FLUX_TEXT2IMAGE_WORKFLOWS = {
         ("decode", "FluxDecodeStep"),
     ]
 }
+
+
+def test_basic_clean_without_ftfy(monkeypatch):
+    monkeypatch.setattr(flux_encoders, "is_ftfy_available", lambda: False)
+
+    assert flux_encoders.basic_clean(" Alice &amp;amp; Bob ") == "Alice & Bob"
 
 
 class TestFluxModularPipelineFast(ModularPipelineTesterMixin):

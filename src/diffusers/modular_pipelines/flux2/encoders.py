@@ -20,7 +20,7 @@ from ...configuration_utils import FrozenDict
 from ...guiders import ClassifierFreeGuidance
 from ...models import AutoencoderKLFlux2
 from ...utils import logging
-from ..modular_pipeline import ModularPipelineBlocks, PipelineState
+from ..modular_pipeline import BlockState, ModularPipelineBlocks, PipelineState
 from ..modular_pipeline_utils import ComponentSpec, ConfigSpec, InputParam, OutputParam
 from .modular_pipeline import Flux2KleinModularPipeline, Flux2ModularPipeline
 
@@ -28,7 +28,7 @@ from .modular_pipeline import Flux2KleinModularPipeline, Flux2ModularPipeline
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def format_text_input(prompts: list[str], system_message: str = None):
+def format_text_input(prompts: list[str], system_message: str | None = None) -> list[list[dict[str, object]]]:
     """Format prompts for Mistral3 chat template."""
     cleaned_txt = [prompt.replace("[IMG]", "") for prompt in prompts]
 
@@ -47,7 +47,7 @@ def format_text_input(prompts: list[str], system_message: str = None):
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -79,9 +79,21 @@ class Flux2TextEncoderStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("prompt"),
-            InputParam("max_sequence_length", type_hint=int, default=512, required=False),
-            InputParam("text_encoder_out_layers", type_hint=tuple[int], default=(10, 20, 30), required=False),
+            InputParam("prompt", description="The prompt or prompts to guide image generation."),
+            InputParam(
+                "max_sequence_length",
+                type_hint=int,
+                default=512,
+                required=False,
+                description="Maximum sequence length for prompt encoding.",
+            ),
+            InputParam(
+                "text_encoder_out_layers",
+                type_hint=tuple[int],
+                default=(10, 20, 30),
+                required=False,
+                description="Mistral3 hidden-state layer indices to concatenate into prompt embeddings.",
+            ),
         ]
 
     @property
@@ -96,7 +108,7 @@ class Flux2TextEncoderStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(block_state):
+    def check_inputs(block_state: BlockState) -> None:
         prompt = block_state.prompt
         if prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
@@ -112,8 +124,8 @@ class Flux2TextEncoderStep(ModularPipelineBlocks):
         # fmt: off
         system_message: str = "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object attribution and actions without speculation.",
         # fmt: on
-        hidden_states_layers: tuple[int] = (10, 20, 30),
-    ):
+        hidden_states_layers: tuple[int, ...] = (10, 20, 30),
+    ) -> torch.Tensor:
         dtype = text_encoder.dtype if dtype is None else dtype
         device = text_encoder.device if device is None else device
 
@@ -192,7 +204,7 @@ class Flux2RemoteTextEncoderStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("prompt"),
+            InputParam("prompt", description="The prompt or prompts to guide image generation."),
         ]
 
     @property
@@ -207,7 +219,7 @@ class Flux2RemoteTextEncoderStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(block_state):
+    def check_inputs(block_state: BlockState) -> None:
         prompt = block_state.prompt
         if prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(block_state.prompt)}")
@@ -269,9 +281,21 @@ class Flux2KleinTextEncoderStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("prompt"),
-            InputParam("max_sequence_length", type_hint=int, default=512, required=False),
-            InputParam("text_encoder_out_layers", type_hint=tuple[int], default=(9, 18, 27), required=False),
+            InputParam("prompt", description="The prompt or prompts to guide image generation."),
+            InputParam(
+                "max_sequence_length",
+                type_hint=int,
+                default=512,
+                required=False,
+                description="Maximum sequence length for prompt encoding.",
+            ),
+            InputParam(
+                "text_encoder_out_layers",
+                type_hint=tuple[int],
+                default=(9, 18, 27),
+                required=False,
+                description="Qwen3 hidden-state layer indices to concatenate into prompt embeddings.",
+            ),
         ]
 
     @property
@@ -286,7 +310,7 @@ class Flux2KleinTextEncoderStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(block_state):
+    def check_inputs(block_state: BlockState) -> None:
         prompt = block_state.prompt
 
         if prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
@@ -301,7 +325,7 @@ class Flux2KleinTextEncoderStep(ModularPipelineBlocks):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         max_sequence_length: int = 512,
-        hidden_states_layers: list[int] = (9, 18, 27),
+        hidden_states_layers: tuple[int, ...] = (9, 18, 27),
     ):
         dtype = text_encoder.dtype if dtype is None else dtype
         device = text_encoder.device if device is None else device
@@ -404,9 +428,21 @@ class Flux2KleinBaseTextEncoderStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("prompt"),
-            InputParam("max_sequence_length", type_hint=int, default=512, required=False),
-            InputParam("text_encoder_out_layers", type_hint=tuple[int], default=(9, 18, 27), required=False),
+            InputParam("prompt", description="The prompt or prompts to guide image generation."),
+            InputParam(
+                "max_sequence_length",
+                type_hint=int,
+                default=512,
+                required=False,
+                description="Maximum sequence length for prompt encoding.",
+            ),
+            InputParam(
+                "text_encoder_out_layers",
+                type_hint=tuple[int],
+                default=(9, 18, 27),
+                required=False,
+                description="Qwen3 hidden-state layer indices to concatenate into prompt embeddings.",
+            ),
         ]
 
     @property
@@ -427,7 +463,7 @@ class Flux2KleinBaseTextEncoderStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(block_state):
+    def check_inputs(block_state: BlockState) -> None:
         prompt = block_state.prompt
 
         if prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
@@ -442,7 +478,7 @@ class Flux2KleinBaseTextEncoderStep(ModularPipelineBlocks):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         max_sequence_length: int = 512,
-        hidden_states_layers: list[int] = (9, 18, 27),
+        hidden_states_layers: tuple[int, ...] = (9, 18, 27),
     ):
         dtype = text_encoder.dtype if dtype is None else dtype
         device = text_encoder.device if device is None else device
@@ -543,8 +579,12 @@ class Flux2VaeEncoderStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("condition_images", type_hint=list[torch.Tensor]),
-            InputParam("generator"),
+            InputParam(
+                "condition_images",
+                type_hint=list[torch.Tensor],
+                description="Preprocessed reference image tensors to encode with the Flux2 VAE.",
+            ),
+            InputParam("generator", type_hint=torch.Generator, description="Torch generator for VAE sampling."),
         ]
 
     @property
@@ -558,7 +598,7 @@ class Flux2VaeEncoderStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def _patchify_latents(latents):
+    def _patchify_latents(latents: torch.Tensor) -> torch.Tensor:
         """Convert latents to patchified format for Flux2."""
         batch_size, num_channels_latents, height, width = latents.shape
         latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
@@ -566,7 +606,9 @@ class Flux2VaeEncoderStep(ModularPipelineBlocks):
         latents = latents.reshape(batch_size, num_channels_latents * 4, height // 2, width // 2)
         return latents
 
-    def _encode_vae_image(self, vae: AutoencoderKLFlux2, image: torch.Tensor, generator: torch.Generator):
+    def _encode_vae_image(
+        self, vae: AutoencoderKLFlux2, image: torch.Tensor, generator: torch.Generator
+    ) -> torch.Tensor:
         """Encode a single image using Flux2 VAE with batch norm normalization."""
         if image.ndim != 4:
             raise ValueError(f"Expected image dims 4, got {image.ndim}.")

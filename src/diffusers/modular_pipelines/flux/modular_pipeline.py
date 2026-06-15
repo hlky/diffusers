@@ -31,26 +31,26 @@ class FluxModularPipeline(ModularPipeline, FluxLoraLoaderMixin, TextualInversion
     default_blocks_name = "FluxAutoBlocks"
 
     @property
-    def default_height(self):
+    def default_height(self) -> int:
         return self.default_sample_size * self.vae_scale_factor
 
     @property
-    def default_width(self):
+    def default_width(self) -> int:
         return self.default_sample_size * self.vae_scale_factor
 
     @property
-    def default_sample_size(self):
+    def default_sample_size(self) -> int:
         return 128
 
     @property
-    def vae_scale_factor(self):
+    def vae_scale_factor(self) -> int:
         vae_scale_factor = 8
         if getattr(self, "vae", None) is not None:
             vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         return vae_scale_factor
 
     @property
-    def num_channels_latents(self):
+    def num_channels_latents(self) -> int:
         num_channels_latents = 16
         if getattr(self, "transformer", None):
             num_channels_latents = self.transformer.config.in_channels // 4

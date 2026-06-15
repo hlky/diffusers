@@ -17,6 +17,65 @@ from ...testing_utils import (
 )
 
 
+class FluxReduxFastTests(unittest.TestCase):
+    pipeline_class = FluxPriorReduxPipeline
+
+    def test_tensor_image_prompt_batch_validation(self):
+        pipe = self.pipeline_class.__new__(self.pipeline_class)
+        image = torch.zeros(2, 3, 16, 16)
+
+        with self.assertRaisesRegex(ValueError, "number of prompts"):
+            pipe.check_inputs(
+                image=image,
+                prompt=["a prompt"],
+                prompt_2=None,
+                prompt_embeds=None,
+                pooled_prompt_embeds=None,
+            )
+
+    def test_pooled_prompt_embeds_scale_batch_validation(self):
+        pipe = self.pipeline_class.__new__(self.pipeline_class)
+        image = torch.zeros(2, 3, 16, 16)
+
+        with self.assertRaisesRegex(ValueError, "pooled_prompt_embeds_scale"):
+            pipe.check_inputs(
+                image=image,
+                prompt=None,
+                prompt_2=None,
+                prompt_embeds=None,
+                pooled_prompt_embeds=None,
+                pooled_prompt_embeds_scale=[1.0],
+            )
+
+    def test_single_numpy_image_batch_validation(self):
+        pipe = self.pipeline_class.__new__(self.pipeline_class)
+        image = np.zeros((16, 16, 3), dtype=np.float32)
+
+        pipe.check_inputs(
+            image=image,
+            prompt=["a prompt"],
+            prompt_2=None,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            prompt_embeds_scale=[1.0],
+            pooled_prompt_embeds_scale=[1.0],
+        )
+
+    def test_single_tensor_image_batch_validation(self):
+        pipe = self.pipeline_class.__new__(self.pipeline_class)
+        image = torch.zeros(3, 16, 16)
+
+        pipe.check_inputs(
+            image=image,
+            prompt=["a prompt"],
+            prompt_2=None,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            prompt_embeds_scale=[1.0],
+            pooled_prompt_embeds_scale=[1.0],
+        )
+
+
 @slow
 @require_big_accelerator
 class FluxReduxSlowTests(unittest.TestCase):

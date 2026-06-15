@@ -25,6 +25,7 @@ from ...image_processor import PipelineImageInput
 from ...loaders import Flux2LoraLoaderMixin
 from ...models import AutoencoderKLFlux2, Flux2Transformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import is_torch_xla_available, logging, replace_example_docstring
 from ...utils.torch_utils import randn_tensor
 from ..pipeline_utils import DiffusionPipeline
@@ -115,13 +116,13 @@ def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -176,7 +177,7 @@ def retrieve_timesteps(
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -259,7 +260,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         dtype: torch.dtype | None = None,
         device: torch.device | None = None,
         max_sequence_length: int = 512,
-        hidden_states_layers: list[int] = (9, 18, 27),
+        hidden_states_layers: tuple[int, ...] = (9, 18, 27),
     ):
         dtype = text_encoder.dtype if dtype is None else dtype
         device = text_encoder.device if device is None else device
@@ -332,7 +333,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._prepare_latent_ids
     def _prepare_latent_ids(
         latents: torch.Tensor,  # (B, C, H, W)
-    ):
+    ) -> torch.Tensor:
         r"""
         Generates 4D position coordinates (T, H, W, L) for latent tensors.
 
@@ -366,7 +367,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         image_latents: list[torch.Tensor],  # list of (B_i, C, H, W) before packing
         batch_size: int,
         scale: int = 10,
-    ):
+    ) -> torch.Tensor:
         r"""
         Generates 4D time-space coordinates (T, H, W, L) for a sequence of image latents.
 
@@ -428,7 +429,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     @staticmethod
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._patchify_latents
-    def _patchify_latents(latents):
+    def _patchify_latents(latents: torch.Tensor) -> torch.Tensor:
         batch_size, num_channels_latents, height, width = latents.shape
         latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
         latents = latents.permute(0, 1, 3, 5, 2, 4)
@@ -437,7 +438,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     @staticmethod
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._unpatchify_latents
-    def _unpatchify_latents(latents):
+    def _unpatchify_latents(latents: torch.Tensor) -> torch.Tensor:
         batch_size, num_channels_latents, height, width = latents.shape
         latents = latents.reshape(batch_size, num_channels_latents // (2 * 2), 2, 2, height, width)
         latents = latents.permute(0, 1, 4, 2, 5, 3)
@@ -446,7 +447,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     @staticmethod
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._pack_latents
-    def _pack_latents(latents):
+    def _pack_latents(latents: torch.Tensor) -> torch.Tensor:
         """
         pack latents: (batch_size, num_channels, height, width) -> (batch_size, height * width, num_channels)
         """
@@ -511,7 +512,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         num_images_per_prompt: int = 1,
         prompt_embeds: torch.Tensor | None = None,
         max_sequence_length: int = 512,
-        text_encoder_out_layers: tuple[int] = (9, 18, 27),
+        text_encoder_out_layers: tuple[int, ...] = (9, 18, 27),
     ):
         device = device or self._execution_device
 
@@ -539,7 +540,7 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         return prompt_embeds, text_ids
 
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._encode_vae_image
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
         if image.ndim != 4:
             raise ValueError(f"Expected image dims 4, got {image.ndim}.")
 
@@ -556,17 +557,17 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     def prepare_latents(
         self,
-        image,
-        timestep,
-        batch_size,
-        num_latents_channels,
-        height,
-        width,
-        dtype,
-        device,
+        image: torch.Tensor,
+        timestep: torch.Tensor,
+        batch_size: int,
+        num_latents_channels: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+        device: torch.device,
         generator: torch.Generator | list[torch.Generator] | None = None,
         latents: torch.Tensor | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -619,11 +620,11 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     def prepare_image_latents(
         self,
         images: list[torch.Tensor],
-        batch_size,
-        generator: torch.Generator,
-        device,
-        dtype,
-    ):
+        batch_size: int,
+        generator: torch.Generator | list[torch.Generator] | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         image_latents = []
         for image in images:
             image = image.to(device=device, dtype=dtype)
@@ -662,14 +663,14 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     def prepare_mask_latents(
         self,
-        mask,
-        batch_size,
-        num_images_per_prompt,
-        height,
-        width,
-        dtype,
-        device,
-    ):
+        mask: torch.Tensor,
+        batch_size: int,
+        num_images_per_prompt: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
         # Interpolate the mask directly to the final packed spatial size.
         target_h = int(height) // (self.vae_scale_factor * 2)
         target_w = int(width) // (self.vae_scale_factor * 2)
@@ -694,7 +695,9 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         return mask
 
     # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps
-    def get_timesteps(self, num_inference_steps, strength, device):
+    def get_timesteps(
+        self, num_inference_steps: int, strength: float, device: torch.device
+    ) -> tuple[torch.Tensor, int]:
         # get the original timestep using init_timestep
         init_timestep = min(num_inference_steps * strength, num_inference_steps)
 
@@ -707,19 +710,19 @@ class Flux2KleinInpaintPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     def check_inputs(
         self,
-        prompt,
-        image,
-        mask_image,
-        image_reference,
-        strength,
-        height,
-        width,
-        output_type,
-        prompt_embeds=None,
-        callback_on_step_end_tensor_inputs=None,
-        padding_mask_crop=None,
-        guidance_scale=None,
-    ):
+        prompt: str | list[str] | None,
+        image: PipelineImageInput,
+        mask_image: PipelineImageInput,
+        image_reference: PipelineImageInput | None,
+        strength: float,
+        height: int | None,
+        width: int | None,
+        output_type: str | None,
+        prompt_embeds: torch.Tensor | None = None,
+        callback_on_step_end_tensor_inputs: list[str] | None = None,
+        padding_mask_crop: int | None = None,
+        guidance_scale: float | None = None,
+    ) -> None:
         if image is None:
             raise ValueError("`image` has to be provided for inpainting.")
 

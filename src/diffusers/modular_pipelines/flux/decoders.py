@@ -24,12 +24,13 @@ from ...utils import logging
 from ...video_processor import VaeImageProcessor
 from ..modular_pipeline import ModularPipelineBlocks, PipelineState
 from ..modular_pipeline_utils import ComponentSpec, InputParam, OutputParam
+from .modular_pipeline import FluxModularPipeline
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def _unpack_latents(latents, height, width, vae_scale_factor):
+def _unpack_latents(latents: torch.Tensor, height: int, width: int, vae_scale_factor: int) -> torch.Tensor:
     batch_size, num_patches, channels = latents.shape
 
     # VAE applies 8x compression on images but we must also account for packing which requires
@@ -67,9 +68,9 @@ class FluxDecodeStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[tuple[str, Any]]:
         return [
-            InputParam("output_type", default="pil"),
-            InputParam("height", default=1024),
-            InputParam("width", default=1024),
+            InputParam.template("output_type"),
+            InputParam.template("height", default=1024),
+            InputParam.template("width", default=1024),
             InputParam(
                 "latents",
                 required=True,
@@ -89,7 +90,7 @@ class FluxDecodeStep(ModularPipelineBlocks):
         ]
 
     @torch.no_grad()
-    def __call__(self, components, state: PipelineState) -> PipelineState:
+    def __call__(self, components: FluxModularPipeline, state: PipelineState) -> PipelineState:
         block_state = self.get_block_state(state)
         vae = components.vae
 

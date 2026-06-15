@@ -30,6 +30,7 @@ from ...image_processor import PipelineImageInput, VaeImageProcessor
 from ...loaders import FluxIPAdapterMixin, FluxLoraLoaderMixin, FromSingleFileMixin, TextualInversionLoaderMixin
 from ...models import AutoencoderKL, FluxTransformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import (
     USE_PEFT_BACKEND,
     deprecate,
@@ -102,12 +103,12 @@ PREFERRED_KONTEXT_RESOLUTIONS = [
 
 
 def calculate_shift(
-    image_seq_len,
+    image_seq_len: int,
     base_seq_len: int = 256,
     max_seq_len: int = 4096,
     base_shift: float = 0.5,
     max_shift: float = 1.15,
-):
+) -> float:
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len
     mu = image_seq_len * m + b
@@ -116,13 +117,13 @@ def calculate_shift(
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -177,7 +178,7 @@ def retrieve_timesteps(
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -236,7 +237,7 @@ class FluxKontextPipeline(
         transformer: FluxTransformer2DModel,
         image_encoder: CLIPVisionModelWithProjection = None,
         feature_extractor: CLIPImageProcessor = None,
-    ):
+    ) -> None:
         super().__init__()
 
         self.register_modules(
@@ -436,7 +437,9 @@ class FluxKontextPipeline(
         return prompt_embeds, pooled_prompt_embeds, text_ids
 
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline.encode_image
-    def encode_image(self, image, device, num_images_per_prompt):
+    def encode_image(
+        self, image: PipelineImageInput, device: torch.device, num_images_per_prompt: int
+    ) -> torch.Tensor:
         dtype = next(self.image_encoder.parameters()).dtype
 
         if not isinstance(image, torch.Tensor):
@@ -449,8 +452,12 @@ class FluxKontextPipeline(
 
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline.prepare_ip_adapter_image_embeds
     def prepare_ip_adapter_image_embeds(
-        self, ip_adapter_image, ip_adapter_image_embeds, device, num_images_per_prompt
-    ):
+        self,
+        ip_adapter_image: PipelineImageInput | list[PipelineImageInput] | None,
+        ip_adapter_image_embeds: torch.Tensor | list[torch.Tensor] | None,
+        device: torch.device,
+        num_images_per_prompt: int,
+    ) -> list[torch.Tensor]:
         image_embeds = []
         if ip_adapter_image_embeds is None:
             if not isinstance(ip_adapter_image, list):
@@ -487,19 +494,19 @@ class FluxKontextPipeline(
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline.check_inputs
     def check_inputs(
         self,
-        prompt,
-        prompt_2,
-        height,
-        width,
-        negative_prompt=None,
-        negative_prompt_2=None,
-        prompt_embeds=None,
-        negative_prompt_embeds=None,
-        pooled_prompt_embeds=None,
-        negative_pooled_prompt_embeds=None,
-        callback_on_step_end_tensor_inputs=None,
-        max_sequence_length=None,
-    ):
+        prompt: str | list[str] | None,
+        prompt_2: str | list[str] | None,
+        height: int,
+        width: int,
+        negative_prompt: str | list[str] | None = None,
+        negative_prompt_2: str | list[str] | None = None,
+        prompt_embeds: torch.Tensor | None = None,
+        negative_prompt_embeds: torch.Tensor | None = None,
+        pooled_prompt_embeds: torch.Tensor | None = None,
+        negative_pooled_prompt_embeds: torch.Tensor | None = None,
+        callback_on_step_end_tensor_inputs: list[str] | None = None,
+        max_sequence_length: int | None = None,
+    ) -> None:
         if height % (self.vae_scale_factor * 2) != 0 or width % (self.vae_scale_factor * 2) != 0:
             logger.warning(
                 f"`height` and `width` have to be divisible by {self.vae_scale_factor * 2} but are {height} and {width}. Dimensions will be resized accordingly"
@@ -542,6 +549,21 @@ class FluxKontextPipeline(
                 f" {negative_prompt_embeds}. Please make sure to only forward one of the two."
             )
 
+        if prompt_embeds is not None and negative_prompt_embeds is not None:
+            if prompt_embeds.shape != negative_prompt_embeds.shape:
+                raise ValueError(
+                    "`prompt_embeds` and `negative_prompt_embeds` must have the same shape when passed directly, but"
+                    f" got: `prompt_embeds` {prompt_embeds.shape} != `negative_prompt_embeds`"
+                    f" {negative_prompt_embeds.shape}."
+                )
+        if pooled_prompt_embeds is not None and negative_pooled_prompt_embeds is not None:
+            if pooled_prompt_embeds.shape != negative_pooled_prompt_embeds.shape:
+                raise ValueError(
+                    "`pooled_prompt_embeds` and `negative_pooled_prompt_embeds` must have the same shape when passed"
+                    f" directly, but got: `pooled_prompt_embeds` {pooled_prompt_embeds.shape} !="
+                    f" `negative_pooled_prompt_embeds` {negative_pooled_prompt_embeds.shape}."
+                )
+
         if prompt_embeds is not None and pooled_prompt_embeds is None:
             raise ValueError(
                 "If `prompt_embeds` are provided, `pooled_prompt_embeds` also have to be passed. Make sure to generate `pooled_prompt_embeds` from the same text encoder that was used to generate `prompt_embeds`."
@@ -556,7 +578,9 @@ class FluxKontextPipeline(
 
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._prepare_latent_image_ids
-    def _prepare_latent_image_ids(batch_size, height, width, device, dtype):
+    def _prepare_latent_image_ids(
+        batch_size: int, height: int, width: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         latent_image_ids = torch.zeros(height, width, 3)
         latent_image_ids[..., 1] = latent_image_ids[..., 1] + torch.arange(height)[:, None]
         latent_image_ids[..., 2] = latent_image_ids[..., 2] + torch.arange(width)[None, :]
@@ -571,7 +595,9 @@ class FluxKontextPipeline(
 
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._pack_latents
-    def _pack_latents(latents, batch_size, num_channels_latents, height, width):
+    def _pack_latents(
+        latents: torch.Tensor, batch_size: int, num_channels_latents: int, height: int, width: int
+    ) -> torch.Tensor:
         latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
         latents = latents.permute(0, 2, 4, 1, 3, 5)
         latents = latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
@@ -580,7 +606,7 @@ class FluxKontextPipeline(
 
     @staticmethod
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._unpack_latents
-    def _unpack_latents(latents, height, width, vae_scale_factor):
+    def _unpack_latents(latents: torch.Tensor, height: int, width: int, vae_scale_factor: int) -> torch.Tensor:
         batch_size, num_patches, channels = latents.shape
 
         # VAE applies 8x compression on images but we must also account for packing which requires
@@ -595,7 +621,7 @@ class FluxKontextPipeline(
 
         return latents
 
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator) -> torch.Tensor:
         if isinstance(generator, list):
             image_latents = [
                 retrieve_latents(self.vae.encode(image[i : i + 1]), generator=generator[i], sample_mode="argmax")

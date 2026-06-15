@@ -234,6 +234,25 @@ class FluxPipelineFastTests(
             np.allclose(no_true_cfg_out, true_cfg_out), "Outputs should be different when true_cfg_scale is set."
         )
 
+    def test_negative_prompt_embeds_shape_validation(self):
+        pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)
+        prompt_embeds = torch.zeros((1, 48, 32), device=torch_device)
+        pooled_prompt_embeds = torch.zeros((1, 32), device=torch_device)
+        negative_prompt_embeds = torch.zeros((1, 47, 32), device=torch_device)
+        negative_pooled_prompt_embeds = torch.zeros((1, 32), device=torch_device)
+
+        with self.assertRaisesRegex(ValueError, "must have the same shape"):
+            pipe.check_inputs(
+                prompt=None,
+                prompt_2=None,
+                height=8,
+                width=8,
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+            )
+
 
 @nightly
 @require_big_accelerator

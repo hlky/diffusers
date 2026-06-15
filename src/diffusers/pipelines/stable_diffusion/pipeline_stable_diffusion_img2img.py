@@ -28,6 +28,7 @@ from ...loaders import FromSingleFileMixin, IPAdapterMixin, StableDiffusionLoraL
 from ...models import AutoencoderKL, ImageProjection, UNet2DConditionModel
 from ...models.lora import adjust_lora_scale_text_encoder
 from ...schedulers import KarrasDiffusionSchedulers
+from ...schedulers.scheduling_utils import SchedulerMixin
 from ...utils import (
     PIL_INTERPOLATION,
     USE_PEFT_BACKEND,
@@ -85,7 +86,7 @@ EXAMPLE_DOC_STRING = """
 
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -121,13 +122,13 @@ def preprocess(image):
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
-    scheduler,
+    scheduler: SchedulerMixin,
     num_inference_steps: int | None = None,
     device: str | torch.device | None = None,
     timesteps: list[int] | None = None,
     sigmas: list[float] | None = None,
     **kwargs,
-):
+) -> tuple[torch.Tensor, int]:
     r"""
     Calls the scheduler's `set_timesteps` method and retrieves timesteps from the scheduler after the call. Handles
     custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
@@ -721,7 +722,9 @@ class StableDiffusionImg2ImgPipeline(
                     f"`ip_adapter_image_embeds` has to be a list of 3D or 4D tensors but is {ip_adapter_image_embeds[0].ndim}D"
                 )
 
-    def get_timesteps(self, num_inference_steps, strength, device):
+    def get_timesteps(
+        self, num_inference_steps: int, strength: float, device: torch.device
+    ) -> tuple[torch.Tensor, int]:
         # get the original timestep using init_timestep
         init_timestep = min(int(num_inference_steps * strength), num_inference_steps)
 

@@ -39,7 +39,12 @@ class Flux2TextInputStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("num_images_per_prompt", default=1),
+            InputParam(
+                "num_images_per_prompt",
+                default=1,
+                type_hint=int,
+                description="The number of images to generate per prompt.",
+            ),
             InputParam(
                 "prompt_embeds",
                 required=True,
@@ -101,7 +106,12 @@ class Flux2KleinBaseTextInputStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("num_images_per_prompt", default=1),
+            InputParam(
+                "num_images_per_prompt",
+                default=1,
+                type_hint=int,
+                description="The number of images to generate per prompt.",
+            ),
             InputParam(
                 "prompt_embeds",
                 required=True,
@@ -192,17 +202,23 @@ class Flux2ProcessImagesInputStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("image"),
-            InputParam("height"),
-            InputParam("width"),
+            InputParam("image", description="Reference image or list of reference images for Flux2 conditioning."),
+            InputParam("height", type_hint=int, description="The height in pixels used to preprocess the image."),
+            InputParam("width", type_hint=int, description="The width in pixels used to preprocess the image."),
         ]
 
     @property
     def intermediate_outputs(self) -> list[OutputParam]:
-        return [OutputParam(name="condition_images", type_hint=list[torch.Tensor])]
+        return [
+            OutputParam(
+                name="condition_images",
+                type_hint=list[torch.Tensor],
+                description="Preprocessed reference image tensors for Flux2 VAE encoding.",
+            )
+        ]
 
     @torch.no_grad()
-    def __call__(self, components: Flux2ModularPipeline, state: PipelineState):
+    def __call__(self, components: Flux2ModularPipeline, state: PipelineState) -> PipelineState:
         block_state = self.get_block_state(state)
         images = block_state.image
 

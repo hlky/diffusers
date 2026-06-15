@@ -30,7 +30,7 @@ from ..controlnets.controlnet import ControlNetConditioningEmbedding, zero_modul
 from ..embeddings import CombinedTimestepGuidanceTextProjEmbeddings, CombinedTimestepTextProjEmbeddings, FluxPosEmbed
 from ..modeling_outputs import Transformer2DModelOutput
 from ..modeling_utils import ModelMixin
-from ..transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformerBlock
+from ..transformers.transformer_flux import FluxSingleTransformerBlock, FluxTransformer2DModel, FluxTransformerBlock
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -124,14 +124,14 @@ class FluxControlNetModel(ModelMixin, AttentionMixin, ConfigMixin, PeftAdapterMi
 
     @classmethod
     def from_transformer(
-        cls,
-        transformer,
+        cls: type["FluxControlNetModel"],
+        transformer: FluxTransformer2DModel,
         num_layers: int = 4,
         num_single_layers: int = 10,
         attention_head_dim: int = 128,
         num_attention_heads: int = 24,
-        load_weights_from_transformer=True,
-    ):
+        load_weights_from_transformer: bool = True,
+    ) -> "FluxControlNetModel":
         config = dict(transformer.config)
         config["num_layers"] = num_layers
         config["num_single_layers"] = num_single_layers
@@ -340,7 +340,7 @@ class FluxMultiControlNetModel(ModelMixin):
             `FluxControlNetModel` as a list.
     """
 
-    def __init__(self, controlnets):
+    def __init__(self, controlnets: list[FluxControlNetModel]) -> None:
         super().__init__()
         self.nets = nn.ModuleList(controlnets)
 

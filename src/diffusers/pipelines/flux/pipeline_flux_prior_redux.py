@@ -79,6 +79,19 @@ EXAMPLE_DOC_STRING = """
 """
 
 
+def _get_image_batch_size(image: PipelineImageInput) -> int:
+    if isinstance(image, Image.Image):
+        return 1
+    if isinstance(image, (list, tuple)):
+        return len(image)
+    if image.ndim in (2, 3):
+        return 1
+    if image.ndim == 4:
+        return image.shape[0]
+
+    raise ValueError(f"`image` must be a single image or a batch of images, but got {image.ndim} dimensions.")
+
+
 class FluxPriorReduxPipeline(DiffusionPipeline):
     r"""
     The Flux Redux pipeline for image-to-image generation.
@@ -142,14 +155,14 @@ class FluxPriorReduxPipeline(DiffusionPipeline):
 
     def check_inputs(
         self,
-        image,
-        prompt,
-        prompt_2,
-        prompt_embeds=None,
-        pooled_prompt_embeds=None,
-        prompt_embeds_scale=1.0,
-        pooled_prompt_embeds_scale=1.0,
-    ):
+        image: PipelineImageInput,
+        prompt: str | list[str] | None,
+        prompt_2: str | list[str] | None,
+        prompt_embeds: torch.Tensor | None = None,
+        pooled_prompt_embeds: torch.Tensor | None = None,
+        prompt_embeds_scale: float | list[float] = 1.0,
+        pooled_prompt_embeds_scale: float | list[float] = 1.0,
+    ) -> None:
         if prompt is not None and prompt_embeds is not None:
             raise ValueError(
                 f"Cannot forward both `prompt`: {prompt} and `prompt_embeds`: {prompt_embeds}. Please make sure to"
@@ -164,22 +177,34 @@ class FluxPriorReduxPipeline(DiffusionPipeline):
             raise ValueError(f"`prompt` has to be of type `str` or `list` but is {type(prompt)}")
         elif prompt_2 is not None and (not isinstance(prompt_2, str) and not isinstance(prompt_2, list)):
             raise ValueError(f"`prompt_2` has to be of type `str` or `list` but is {type(prompt_2)}")
-        if prompt is not None and (isinstance(prompt, list) and isinstance(image, list) and len(prompt) != len(image)):
+
+        image_batch_size = _get_image_batch_size(image)
+
+        if prompt is not None and isinstance(prompt, list) and len(prompt) != image_batch_size:
             raise ValueError(
-                f"number of prompts must be equal to number of images, but {len(prompt)} prompts were provided and {len(image)} images"
+                f"number of prompts must be equal to number of images, but {len(prompt)} prompts were provided and {image_batch_size} images"
+            )
+        if prompt_2 is not None and isinstance(prompt_2, list) and len(prompt_2) != image_batch_size:
+            raise ValueError(
+                f"number of prompt_2 prompts must be equal to number of images, but {len(prompt_2)} prompts were provided and {image_batch_size} images"
             )
         if prompt_embeds is not None and pooled_prompt_embeds is None:
             raise ValueError(
                 "If `prompt_embeds` are provided, `pooled_prompt_embeds` also have to be passed. Make sure to generate `pooled_prompt_embeds` from the same text encoder that was used to generate `prompt_embeds`."
             )
-        if isinstance(prompt_embeds_scale, list) and (
-            isinstance(image, list) and len(prompt_embeds_scale) != len(image)
+        for scale_name, scale in (
+            ("prompt_embeds_scale", prompt_embeds_scale),
+            ("pooled_prompt_embeds_scale", pooled_prompt_embeds_scale),
         ):
-            raise ValueError(
-                f"number of weights must be equal to number of images, but {len(prompt_embeds_scale)} weights were provided and {len(image)} images"
-            )
+            if isinstance(scale, list) and len(scale) != image_batch_size:
+                raise ValueError(
+                    f"number of weights for `{scale_name}` must be equal to number of images, but {len(scale)}"
+                    f" weights were provided and {image_batch_size} images"
+                )
 
-    def encode_image(self, image, device, num_images_per_prompt):
+    def encode_image(
+        self, image: PipelineImageInput, device: torch.device, num_images_per_prompt: int
+    ) -> torch.Tensor:
         dtype = next(self.image_encoder.parameters()).dtype
         image = self.feature_extractor.preprocess(
             images=image, do_resize=True, return_tensors="pt", do_convert_rgb=True
@@ -427,12 +452,7 @@ class FluxPriorReduxPipeline(DiffusionPipeline):
         )
 
         # 2. Define call parameters
-        if image is not None and isinstance(image, Image.Image):
-            batch_size = 1
-        elif image is not None and isinstance(image, list):
-            batch_size = len(image)
-        else:
-            batch_size = image.shape[0]
+        batch_size = _get_image_batch_size(image)
         if prompt is not None and isinstance(prompt, str):
             prompt = batch_size * [prompt]
         if isinstance(prompt_embeds_scale, float):

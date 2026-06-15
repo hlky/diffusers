@@ -13,6 +13,8 @@
 # limitations under the License.
 from contextlib import nullcontext
 
+import torch
+
 from ..models.embeddings import (
     ImageProjection,
     MultiIPAdapterImageProjection,
@@ -34,7 +36,9 @@ class FluxTransformer2DLoadersMixin:
     Load layers into a [`FluxTransformer2DModel`].
     """
 
-    def _convert_ip_adapter_image_proj_to_diffusers(self, state_dict, low_cpu_mem_usage=_LOW_CPU_MEM_USAGE_DEFAULT):
+    def _convert_ip_adapter_image_proj_to_diffusers(
+        self, state_dict: dict[str, torch.Tensor], low_cpu_mem_usage: bool = _LOW_CPU_MEM_USAGE_DEFAULT
+    ) -> ImageProjection:
         if low_cpu_mem_usage:
             if is_accelerate_available():
                 from accelerate import init_empty_weights
@@ -86,7 +90,11 @@ class FluxTransformer2DLoadersMixin:
 
         return image_projection
 
-    def _convert_ip_adapter_attn_to_diffusers(self, state_dicts, low_cpu_mem_usage=_LOW_CPU_MEM_USAGE_DEFAULT):
+    def _convert_ip_adapter_attn_to_diffusers(
+        self,
+        state_dicts: list[dict[str, dict[str, torch.Tensor]]],
+        low_cpu_mem_usage: bool = _LOW_CPU_MEM_USAGE_DEFAULT,
+    ) -> dict[str, torch.nn.Module]:
         from ..models.transformers.transformer_flux import FluxIPAdapterAttnProcessor
 
         if low_cpu_mem_usage:
@@ -159,7 +167,11 @@ class FluxTransformer2DLoadersMixin:
 
         return attn_procs
 
-    def _load_ip_adapter_weights(self, state_dicts, low_cpu_mem_usage=_LOW_CPU_MEM_USAGE_DEFAULT):
+    def _load_ip_adapter_weights(
+        self,
+        state_dicts: dict[str, dict[str, torch.Tensor]] | list[dict[str, dict[str, torch.Tensor]]],
+        low_cpu_mem_usage: bool = _LOW_CPU_MEM_USAGE_DEFAULT,
+    ) -> None:
         if not isinstance(state_dicts, list):
             state_dicts = [state_dicts]
 

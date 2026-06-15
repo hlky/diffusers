@@ -206,6 +206,36 @@ class FluxControlNetPipelineFastTests(unittest.TestCase, PipelineTesterMixin, Fl
             output_height, output_width, _ = image.shape
             assert (output_height, output_width) == (expected_height, expected_width)
 
+    def test_flux_true_cfg_with_negative_prompt_embeds(self):
+        pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)
+        inputs = self.get_dummy_inputs(torch_device)
+        inputs.pop("prompt")
+        inputs.pop("generator")
+
+        prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
+            "A painting of a squirrel eating a burger",
+            device=torch_device,
+            max_sequence_length=512,
+        )
+        negative_prompt_embeds, negative_pooled_prompt_embeds, _ = pipe.encode_prompt(
+            "bad quality",
+            device=torch_device,
+            max_sequence_length=512,
+        )
+        inputs.update(
+            {
+                "prompt_embeds": prompt_embeds,
+                "pooled_prompt_embeds": pooled_prompt_embeds,
+                "negative_prompt_embeds": negative_prompt_embeds,
+                "negative_pooled_prompt_embeds": negative_pooled_prompt_embeds,
+            }
+        )
+
+        no_true_cfg_out = pipe(**inputs, generator=torch.manual_seed(0)).images[0]
+        inputs["true_cfg_scale"] = 2.0
+        true_cfg_out = pipe(**inputs, generator=torch.manual_seed(0)).images[0]
+        assert not np.allclose(no_true_cfg_out, true_cfg_out)
+
 
 @nightly
 @require_big_accelerator

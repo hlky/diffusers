@@ -50,7 +50,12 @@ class FluxLoopDenoiser(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[tuple[str, Any]]:
         return [
-            InputParam("joint_attention_kwargs"),
+            InputParam(
+                "joint_attention_kwargs",
+                type_hint=dict[str, Any] | None,
+                required=False,
+                description="Additional kwargs forwarded to the transformer's attention processors.",
+            ),
             InputParam(
                 "latents",
                 required=True,
@@ -92,7 +97,7 @@ class FluxLoopDenoiser(ModularPipelineBlocks):
     @torch.no_grad()
     def __call__(
         self, components: FluxModularPipeline, block_state: BlockState, i: int, t: torch.Tensor
-    ) -> PipelineState:
+    ) -> tuple[FluxModularPipeline, BlockState]:
         noise_pred = components.transformer(
             hidden_states=block_state.latents,
             timestep=t.flatten() / 1000,
@@ -127,7 +132,12 @@ class FluxKontextLoopDenoiser(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[tuple[str, Any]]:
         return [
-            InputParam("joint_attention_kwargs"),
+            InputParam(
+                "joint_attention_kwargs",
+                type_hint=dict[str, Any] | None,
+                required=False,
+                description="Additional kwargs forwarded to the transformer's attention processors.",
+            ),
             InputParam(
                 "latents",
                 required=True,
@@ -174,7 +184,7 @@ class FluxKontextLoopDenoiser(ModularPipelineBlocks):
     @torch.no_grad()
     def __call__(
         self, components: FluxModularPipeline, block_state: BlockState, i: int, t: torch.Tensor
-    ) -> PipelineState:
+    ) -> tuple[FluxModularPipeline, BlockState]:
         latents = block_state.latents
         latent_model_input = latents
         image_latents = block_state.image_latents
@@ -220,14 +230,16 @@ class FluxLoopAfterDenoiser(ModularPipelineBlocks):
 
     @property
     def intermediate_inputs(self) -> list[str]:
-        return [InputParam("generator")]
+        return [InputParam.template("generator", required=False)]
 
     @property
     def intermediate_outputs(self) -> list[OutputParam]:
         return [OutputParam("latents", type_hint=torch.Tensor, description="The denoised latents")]
 
     @torch.no_grad()
-    def __call__(self, components: FluxModularPipeline, block_state: BlockState, i: int, t: torch.Tensor):
+    def __call__(
+        self, components: FluxModularPipeline, block_state: BlockState, i: int, t: torch.Tensor
+    ) -> tuple[FluxModularPipeline, BlockState]:
         # Perform scheduler step using the predicted output
         latents_dtype = block_state.latents.dtype
         block_state.latents = components.scheduler.step(

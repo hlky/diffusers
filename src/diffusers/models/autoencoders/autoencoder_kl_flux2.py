@@ -229,7 +229,7 @@ class AutoencoderKLFlux2(
 
     @apply_forward_hook
     def decode(
-        self, z: torch.FloatTensor, return_dict: bool = True, generator=None
+        self, z: torch.FloatTensor, return_dict: bool = True, generator: torch.Generator | None = None
     ) -> DecoderOutput | torch.FloatTensor:
         """
         Decode a batch of images.
@@ -238,6 +238,8 @@ class AutoencoderKLFlux2(
             z (`torch.Tensor`): Input batch of latent vectors.
             return_dict (`bool`, *optional*, defaults to `True`):
                 Whether to return a [`~models.vae.DecoderOutput`] instead of a plain tuple.
+            generator (`torch.Generator`, *optional*):
+                A random generator. This argument is accepted for API compatibility and is not used.
 
         Returns:
             [`~models.vae.DecoderOutput`] or `tuple`:

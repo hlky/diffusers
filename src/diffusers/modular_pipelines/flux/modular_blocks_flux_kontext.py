@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 from ...utils import logging
 from ..modular_pipeline import AutoPipelineBlocks, SequentialPipelineBlocks
 from ..modular_pipeline_utils import InsertableDict, OutputParam
@@ -48,16 +49,16 @@ class FluxKontextVaeEncoderStep(SequentialPipelineBlocks):
           image_processor (`VaeImageProcessor`) vae (`AutoencoderKL`)
 
       Inputs:
-          image (`None`, *optional*):
-              TODO: Add description.
+          image (`Image | list`, *optional*):
+              Reference image(s) for denoising. Can be a single image or list of images.
           _auto_resize (`bool`, *optional*, defaults to True):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
+              Whether to resize the input image to a preferred Flux Kontext resolution.
+          generator (`Generator`, *optional*):
+              Torch generator for deterministic generation.
 
       Outputs:
           processed_image (`None`):
-              TODO: Add description.
+              Preprocessed image tensor ready for VAE encoding.
           image_latents (`Tensor`):
               The latents representing the reference image
     """
@@ -84,16 +85,16 @@ class FluxKontextAutoVaeEncoderStep(AutoPipelineBlocks):
           image_processor (`VaeImageProcessor`) vae (`AutoencoderKL`)
 
       Inputs:
-          image (`None`, *optional*):
-              TODO: Add description.
+          image (`Image | list`, *optional*):
+              Reference image(s) for denoising. Can be a single image or list of images.
           _auto_resize (`bool`, *optional*, defaults to True):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
+              Whether to resize the input image to a preferred Flux Kontext resolution.
+          generator (`Generator`, *optional*):
+              Torch generator for deterministic generation.
 
       Outputs:
           processed_image (`None`):
-              TODO: Add description.
+              Preprocessed image tensor ready for VAE encoding.
           image_latents (`Tensor`):
               The latents representing the reference image
     """
@@ -105,7 +106,7 @@ class FluxKontextAutoVaeEncoderStep(AutoPipelineBlocks):
     block_trigger_inputs = ["image"]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Vae encoder step that encode the image inputs into their latent representations.\n"
             + "This is an auto pipeline block that works for image-conditioned tasks.\n"
@@ -125,30 +126,30 @@ class FluxKontextBeforeDenoiseStep(SequentialPipelineBlocks):
 
       Inputs:
           height (`int`, *optional*):
-              TODO: Add description.
+              The height in pixels of the generated image.
           width (`int`, *optional*):
-              TODO: Add description.
+              The width in pixels of the generated image.
           latents (`Tensor | NoneType`, *optional*):
-              TODO: Add description.
+              Pre-generated noisy latents for image generation.
           num_images_per_prompt (`int`, *optional*, defaults to 1):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
+              The number of images to generate per prompt.
+          generator (`Generator`, *optional*):
+              Torch generator for deterministic generation.
           batch_size (`int`):
-              Number of prompts, the final batch size of model inputs should be `batch_size * num_images_per_prompt`.
-              Can be generated in input step.
+              Number of prompts, the final batch size of model inputs should be batch_size * num_images_per_prompt. Can
+              be generated in input step.
           dtype (`dtype`, *optional*):
               The dtype of the model inputs
-          num_inference_steps (`None`, *optional*, defaults to 50):
-              TODO: Add description.
-          timesteps (`None`, *optional*):
-              TODO: Add description.
-          sigmas (`None`, *optional*):
-              TODO: Add description.
-          guidance_scale (`None`, *optional*, defaults to 3.5):
-              TODO: Add description.
-          prompt_embeds (`None`, *optional*):
-              TODO: Add description.
+          num_inference_steps (`int`, *optional*, defaults to 50):
+              The number of denoising steps.
+          timesteps (`Tensor`, *optional*):
+              Timesteps for the denoising process.
+          sigmas (`list`, *optional*):
+              Custom sigmas for the denoising process.
+          guidance_scale (`float`, *optional*, defaults to 3.5):
+              Guidance scale used to prepare Flux guidance conditioning.
+          prompt_embeds (`Tensor`):
+              text embeddings used to guide the image generation. Can be generated from text_encoder step.
 
       Outputs:
           latents (`Tensor`):
@@ -171,7 +172,7 @@ class FluxKontextBeforeDenoiseStep(SequentialPipelineBlocks):
     block_names = ["prepare_latents", "set_timesteps", "prepare_rope_inputs"]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return "Before denoise step that prepares the inputs for the denoise step for Flux Kontext\n"
         "for text-to-image tasks."
 
@@ -188,34 +189,34 @@ class FluxKontextImageConditionedBeforeDenoiseStep(SequentialPipelineBlocks):
 
       Inputs:
           height (`int`, *optional*):
-              TODO: Add description.
+              The height in pixels of the generated image.
           width (`int`, *optional*):
-              TODO: Add description.
+              The width in pixels of the generated image.
           latents (`Tensor | NoneType`, *optional*):
-              TODO: Add description.
+              Pre-generated noisy latents for image generation.
           num_images_per_prompt (`int`, *optional*, defaults to 1):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
+              The number of images to generate per prompt.
+          generator (`Generator`, *optional*):
+              Torch generator for deterministic generation.
           batch_size (`int`):
-              Number of prompts, the final batch size of model inputs should be `batch_size * num_images_per_prompt`.
-              Can be generated in input step.
+              Number of prompts, the final batch size of model inputs should be batch_size * num_images_per_prompt. Can
+              be generated in input step.
           dtype (`dtype`, *optional*):
               The dtype of the model inputs
-          num_inference_steps (`None`, *optional*, defaults to 50):
-              TODO: Add description.
-          timesteps (`None`, *optional*):
-              TODO: Add description.
-          sigmas (`None`, *optional*):
-              TODO: Add description.
-          guidance_scale (`None`, *optional*, defaults to 3.5):
-              TODO: Add description.
-          image_height (`None`, *optional*):
-              TODO: Add description.
-          image_width (`None`, *optional*):
-              TODO: Add description.
-          prompt_embeds (`None`, *optional*):
-              TODO: Add description.
+          num_inference_steps (`int`, *optional*, defaults to 50):
+              The number of denoising steps.
+          timesteps (`Tensor`, *optional*):
+              Timesteps for the denoising process.
+          sigmas (`list`, *optional*):
+              Custom sigmas for the denoising process.
+          guidance_scale (`float`, *optional*, defaults to 3.5):
+              Guidance scale used to prepare Flux guidance conditioning.
+          image_height (`int`, *optional*):
+              Height of the encoded conditioning image.
+          image_width (`int`, *optional*):
+              Width of the encoded conditioning image.
+          prompt_embeds (`Tensor`):
+              text embeddings used to guide the image generation. Can be generated from text_encoder step.
 
       Outputs:
           latents (`Tensor`):
@@ -238,7 +239,7 @@ class FluxKontextImageConditionedBeforeDenoiseStep(SequentialPipelineBlocks):
     block_names = ["prepare_latents", "set_timesteps", "prepare_rope_inputs"]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Before denoise step that prepare the inputs for the denoise step for Flux Kontext\n"
             "for image-conditioned tasks."
@@ -258,35 +259,35 @@ class FluxKontextAutoBeforeDenoiseStep(AutoPipelineBlocks):
           scheduler (`FlowMatchEulerDiscreteScheduler`)
 
       Inputs:
-          height (`int`, *optional*):
-              TODO: Add description.
-          width (`int`, *optional*):
-              TODO: Add description.
+          height (`int`):
+              The height in pixels of the generated image.
+          width (`int`):
+              The width in pixels of the generated image.
           latents (`Tensor | NoneType`, *optional*):
-              TODO: Add description.
+              Pre-generated noisy latents for image generation.
           num_images_per_prompt (`int`, *optional*, defaults to 1):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
+              The number of images to generate per prompt.
+          generator (`Generator`, *optional*):
+              Torch generator for deterministic generation.
           batch_size (`int`):
-              Number of prompts, the final batch size of model inputs should be `batch_size * num_images_per_prompt`.
-              Can be generated in input step.
+              Number of prompts, the final batch size of model inputs should be batch_size * num_images_per_prompt. Can
+              be generated in input step.
           dtype (`dtype`, *optional*):
               The dtype of the model inputs
-          num_inference_steps (`None`, *optional*, defaults to 50):
-              TODO: Add description.
-          timesteps (`None`, *optional*):
-              TODO: Add description.
-          sigmas (`None`, *optional*):
-              TODO: Add description.
-          guidance_scale (`None`, *optional*, defaults to 3.5):
-              TODO: Add description.
-          image_height (`None`, *optional*):
-              TODO: Add description.
-          image_width (`None`, *optional*):
-              TODO: Add description.
-          prompt_embeds (`None`, *optional*):
-              TODO: Add description.
+          num_inference_steps (`int`, *optional*, defaults to 50):
+              The number of denoising steps.
+          timesteps (`Tensor`, *optional*):
+              Timesteps for the denoising process.
+          sigmas (`list`, *optional*):
+              Custom sigmas for the denoising process.
+          guidance_scale (`float`, *optional*, defaults to 3.5):
+              Guidance scale used to prepare Flux guidance conditioning.
+          image_height (`int`, *optional*):
+              Height of the encoded conditioning image.
+          image_width (`int`, *optional*):
+              Width of the encoded conditioning image.
+          prompt_embeds (`Tensor`):
+              text embeddings used to guide the image generation. Can be generated from text_encoder step.
 
       Outputs:
           latents (`Tensor`):
@@ -310,7 +311,7 @@ class FluxKontextAutoBeforeDenoiseStep(AutoPipelineBlocks):
     block_trigger_inputs = ["image_latents", None]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Before denoise step that prepare the inputs for the denoise step.\n"
             + "This is an auto pipeline block that works for text2image.\n"
@@ -328,20 +329,20 @@ class FluxKontextInputStep(SequentialPipelineBlocks):
        - update height/width based `image_latents`, patchify `image_latents`.
 
       Inputs:
-          height (`None`, *optional*):
-              TODO: Add description.
-          width (`None`, *optional*):
-              TODO: Add description.
+          height (`int`, *optional*):
+              The height in pixels of the generated image.
+          width (`int`, *optional*):
+              The width in pixels of the generated image.
           max_area (`int`, *optional*, defaults to 1048576):
-              TODO: Add description.
-          num_images_per_prompt (`None`, *optional*, defaults to 1):
-              TODO: Add description.
+              Maximum pixel area to fit the generated resolution within while preserving aspect ratio.
+          num_images_per_prompt (`int`, *optional*, defaults to 1):
+              The number of images to generate per prompt.
           prompt_embeds (`Tensor`):
-              Pre-generated text embeddings. Can be generated from text_encoder step.
+              Pre-generated text embeddings. Can be generated from the text encoder step.
           pooled_prompt_embeds (`Tensor`, *optional*):
               Pre-generated pooled text embeddings. Can be generated from text_encoder step.
-          image_latents (`None`, *optional*):
-              TODO: Add description.
+          image_latents (`Tensor | NoneType`, *optional*):
+              Optional latent input `image_latents` to patchify and batch-expand.
 
       Outputs:
           height (`int`):
@@ -367,7 +368,7 @@ class FluxKontextInputStep(SequentialPipelineBlocks):
     block_names = ["set_resolution", "text_inputs", "additional_inputs"]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Input step that prepares the inputs for the both text2img and img2img denoising step. It:\n"
             " - make sure the text embeddings have consistent batch size as well as the additional inputs (`image_latents`).\n"
@@ -385,20 +386,20 @@ class FluxKontextAutoInputStep(AutoPipelineBlocks):
        - `FluxKontextInputStep` is also capable of handling text2image task when `image_latent` isn't present.
 
       Inputs:
-          height (`None`, *optional*):
-              TODO: Add description.
-          width (`None`, *optional*):
-              TODO: Add description.
+          height (`int`, *optional*):
+              The height in pixels of the generated image.
+          width (`int`, *optional*):
+              The width in pixels of the generated image.
           max_area (`int`, *optional*, defaults to 1048576):
-              TODO: Add description.
-          num_images_per_prompt (`None`, *optional*, defaults to 1):
-              TODO: Add description.
+              Maximum pixel area to fit the generated resolution within while preserving aspect ratio.
+          num_images_per_prompt (`int`, *optional*, defaults to 1):
+              The number of images to generate per prompt.
           prompt_embeds (`Tensor`):
-              Pre-generated text embeddings. Can be generated from text_encoder step.
+              Pre-generated text embeddings. Can be generated from the text encoder step.
           pooled_prompt_embeds (`Tensor`, *optional*):
               Pre-generated pooled text embeddings. Can be generated from text_encoder step.
-          image_latents (`None`, *optional*):
-              TODO: Add description.
+          image_latents (`Tensor | NoneType`, *optional*):
+              Optional latent input `image_latents` to patchify and batch-expand.
 
       Outputs:
           height (`int`):
@@ -425,7 +426,7 @@ class FluxKontextAutoInputStep(AutoPipelineBlocks):
     block_trigger_inputs = ["image_latents", None]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Input step that standardize the inputs for the denoising step, e.g. make sure inputs have consistent batch size, and patchified. \n"
             " This is an auto pipeline block that works for text2image/img2img tasks.\n"
@@ -446,34 +447,34 @@ class FluxKontextCoreDenoiseStep(SequentialPipelineBlocks):
           scheduler (`FlowMatchEulerDiscreteScheduler`) transformer (`FluxTransformer2DModel`)
 
       Inputs:
-          height (`None`, *optional*):
-              TODO: Add description.
-          width (`None`, *optional*):
-              TODO: Add description.
+          height (`int`, *optional*):
+              The height in pixels of the generated image.
+          width (`int`, *optional*):
+              The width in pixels of the generated image.
           max_area (`int`, *optional*, defaults to 1048576):
-              TODO: Add description.
-          num_images_per_prompt (`None`, *optional*, defaults to 1):
-              TODO: Add description.
+              Maximum pixel area to fit the generated resolution within while preserving aspect ratio.
+          num_images_per_prompt (`int`, *optional*, defaults to 1):
+              The number of images to generate per prompt.
           prompt_embeds (`Tensor`):
-              Pre-generated text embeddings. Can be generated from text_encoder step.
+              Pre-generated text embeddings. Can be generated from the text encoder step.
           pooled_prompt_embeds (`Tensor`, *optional*):
               Pre-generated pooled text embeddings. Can be generated from text_encoder step.
-          image_latents (`None`, *optional*):
-              TODO: Add description.
+          image_latents (`Tensor | NoneType`, *optional*):
+              Optional latent input `image_latents` to patchify and batch-expand.
           latents (`Tensor | NoneType`, *optional*):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
-          num_inference_steps (`None`, *optional*, defaults to 50):
-              TODO: Add description.
-          timesteps (`None`, *optional*):
-              TODO: Add description.
-          sigmas (`None`, *optional*):
-              TODO: Add description.
-          guidance_scale (`None`, *optional*, defaults to 3.5):
-              TODO: Add description.
-          joint_attention_kwargs (`None`, *optional*):
-              TODO: Add description.
+              Pre-generated noisy latents for image generation.
+          generator (`Generator`, *optional*):
+              Torch generator for deterministic generation.
+          num_inference_steps (`int`, *optional*, defaults to 50):
+              The number of denoising steps.
+          timesteps (`Tensor`, *optional*):
+              Timesteps for the denoising process.
+          sigmas (`list`, *optional*):
+              Custom sigmas for the denoising process.
+          guidance_scale (`float`, *optional*, defaults to 3.5):
+              Guidance scale used to prepare Flux guidance conditioning.
+          joint_attention_kwargs (`dict | NoneType`, *optional*):
+              Additional kwargs forwarded to the transformer's attention processors.
 
       Outputs:
           latents (`Tensor`):
@@ -485,7 +486,7 @@ class FluxKontextCoreDenoiseStep(SequentialPipelineBlocks):
     block_names = ["input", "before_denoise", "denoise"]
 
     @property
-    def description(self):
+    def description(self) -> str:
         return (
             "Core step that performs the denoising process for Flux Kontext.\n"
             + "This step supports text-to-image and image-conditioned tasks for Flux Kontext:\n"
@@ -494,7 +495,7 @@ class FluxKontextCoreDenoiseStep(SequentialPipelineBlocks):
         )
 
     @property
-    def outputs(self):
+    def outputs(self) -> list[OutputParam]:
         return [
             OutputParam.template("latents"),
         ]
@@ -525,42 +526,42 @@ class FluxKontextAutoBlocks(SequentialPipelineBlocks):
           (`FlowMatchEulerDiscreteScheduler`) transformer (`FluxTransformer2DModel`)
 
       Inputs:
-          prompt (`None`, *optional*):
-              TODO: Add description.
-          prompt_2 (`None`, *optional*):
-              TODO: Add description.
+          prompt (`str`, *optional*):
+              The prompt or prompts to guide image generation.
+          prompt_2 (`str | list[str]`, *optional*):
+              Optional second prompt or prompts for the T5 text encoder.
           max_sequence_length (`int`, *optional*, defaults to 512):
-              TODO: Add description.
+              Maximum sequence length for prompt encoding.
           joint_attention_kwargs (`None`, *optional*):
-              TODO: Add description.
-          image (`None`, *optional*):
-              TODO: Add description.
+              Additional kwargs forwarded to the transformer's attention processors.
+          image (`PIL.Image.Image | list[PIL.Image.Image]`, *optional*):
+              Reference image(s) for denoising. Can be a single image or list of images.
           _auto_resize (`bool`, *optional*, defaults to True):
-              TODO: Add description.
-          generator (`None`, *optional*):
-              TODO: Add description.
-          height (`None`, *optional*):
-              TODO: Add description.
-          width (`None`, *optional*):
-              TODO: Add description.
+              Whether to resize the input image to a preferred Flux Kontext resolution.
+          generator (`torch.Generator`, *optional*):
+              Torch generator for deterministic generation.
+          height (`int`, *optional*):
+              The height in pixels of the generated image.
+          width (`int`, *optional*):
+              The width in pixels of the generated image.
           max_area (`int`, *optional*, defaults to 1048576):
-              TODO: Add description.
-          num_images_per_prompt (`None`, *optional*, defaults to 1):
-              TODO: Add description.
-          image_latents (`None`, *optional*):
-              TODO: Add description.
+              Maximum pixel area to fit the generated resolution within while preserving aspect ratio.
+          num_images_per_prompt (`int`, *optional*, defaults to 1):
+              The number of images to generate per prompt.
+          image_latents (`Tensor`, *optional*):
+              Optional latent input `image_latents` to patchify and batch-expand.
           latents (`Tensor | NoneType`, *optional*):
-              TODO: Add description.
-          num_inference_steps (`None`, *optional*, defaults to 50):
-              TODO: Add description.
-          timesteps (`None`, *optional*):
-              TODO: Add description.
-          sigmas (`None`, *optional*):
-              TODO: Add description.
-          guidance_scale (`None`, *optional*, defaults to 3.5):
-              TODO: Add description.
-          output_type (`None`, *optional*, defaults to pil):
-              TODO: Add description.
+              Pre-generated noisy latents for image generation.
+          num_inference_steps (`int`, *optional*, defaults to 50):
+              The number of denoising steps.
+          timesteps (`Tensor`, *optional*):
+              Timesteps for the denoising process.
+          sigmas (`list[float]`, *optional*):
+              Custom sigmas for the denoising process.
+          guidance_scale (`float`, *optional*, defaults to 3.5):
+              Guidance scale used to prepare Flux guidance conditioning.
+          output_type (`str`, *optional*, defaults to pil):
+              Output format: 'pil', 'np', 'pt'.
 
       Outputs:
           images (`list`):
@@ -577,9 +578,9 @@ class FluxKontextAutoBlocks(SequentialPipelineBlocks):
     }
 
     @property
-    def description(self):
+    def description(self) -> str:
         return "Modular pipeline for image-to-image using Flux Kontext."
 
     @property
-    def outputs(self):
+    def outputs(self) -> list[OutputParam]:
         return [OutputParam.template("images")]

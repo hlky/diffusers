@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import html
+from typing import Any
 
 import regex as re
 import torch
@@ -23,9 +24,10 @@ from ...image_processor import VaeImageProcessor, is_valid_image, is_valid_image
 from ...loaders import FluxLoraLoaderMixin, TextualInversionLoaderMixin
 from ...models import AutoencoderKL
 from ...utils import USE_PEFT_BACKEND, is_ftfy_available, logging, scale_lora_layers, unscale_lora_layers
-from ..modular_pipeline import ModularPipelineBlocks, PipelineState
+from ..modular_pipeline import BlockState, ModularPipelineBlocks, PipelineState
 from ..modular_pipeline_utils import ComponentSpec, InputParam, OutputParam
 from .modular_pipeline import FluxModularPipeline
+from .utils import PREFERRED_KONTEXT_RESOLUTIONS
 
 
 if is_ftfy_available():
@@ -35,19 +37,20 @@ if is_ftfy_available():
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-def basic_clean(text):
-    text = ftfy.fix_text(text)
+def basic_clean(text: str) -> str:
+    if is_ftfy_available():
+        text = ftfy.fix_text(text)
     text = html.unescape(html.unescape(text))
     return text.strip()
 
 
-def whitespace_clean(text):
+def whitespace_clean(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     text = text.strip()
     return text
 
 
-def prompt_clean(text):
+def prompt_clean(text: str) -> str:
     text = whitespace_clean(basic_clean(text))
     return text
 
@@ -55,7 +58,7 @@ def prompt_clean(text):
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
-):
+) -> torch.Tensor:
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
     elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
@@ -66,7 +69,9 @@ def retrieve_latents(
         raise AttributeError("Could not access latents of provided encoder_output")
 
 
-def encode_vae_image(vae: AutoencoderKL, image: torch.Tensor, generator: torch.Generator, sample_mode="sample"):
+def encode_vae_image(
+    vae: AutoencoderKL, image: torch.Tensor, generator: torch.Generator, sample_mode: str = "sample"
+) -> torch.Tensor:
     if isinstance(generator, list):
         image_latents = [
             retrieve_latents(vae.encode(image[i : i + 1]), generator=generator[i], sample_mode=sample_mode)
@@ -101,14 +106,19 @@ class FluxProcessImagesInputStep(ModularPipelineBlocks):
 
     @property
     def inputs(self) -> list[InputParam]:
-        return [InputParam("resized_image"), InputParam("image"), InputParam("height"), InputParam("width")]
+        return [
+            InputParam("resized_image", description="Pre-resized image inputs that bypass image resizing."),
+            InputParam.template("image", required=False),
+            InputParam.template("height", required=False),
+            InputParam.template("width", required=False),
+        ]
 
     @property
     def intermediate_outputs(self) -> list[OutputParam]:
-        return [OutputParam(name="processed_image")]
+        return [OutputParam(name="processed_image", description="Preprocessed image tensor ready for VAE encoding.")]
 
     @staticmethod
-    def check_inputs(height, width, vae_scale_factor):
+    def check_inputs(height: int | None, width: int | None, vae_scale_factor: int) -> None:
         if height is not None and height % (vae_scale_factor * 2) != 0:
             raise ValueError(f"Height must be divisible by {vae_scale_factor * 2} but is {height}")
 
@@ -116,7 +126,7 @@ class FluxProcessImagesInputStep(ModularPipelineBlocks):
             raise ValueError(f"Width must be divisible by {vae_scale_factor * 2} but is {width}")
 
     @torch.no_grad()
-    def __call__(self, components: FluxModularPipeline, state: PipelineState):
+    def __call__(self, components: FluxModularPipeline, state: PipelineState) -> PipelineState:
         block_state = self.get_block_state(state)
 
         if block_state.resized_image is None and block_state.image is None:
@@ -162,16 +172,22 @@ class FluxKontextProcessImagesInputStep(ModularPipelineBlocks):
 
     @property
     def inputs(self) -> list[InputParam]:
-        return [InputParam("image"), InputParam("_auto_resize", type_hint=bool, default=True)]
+        return [
+            InputParam.template("image", required=False),
+            InputParam(
+                "_auto_resize",
+                type_hint=bool,
+                default=True,
+                description="Whether to resize the input image to a preferred Flux Kontext resolution.",
+            ),
+        ]
 
     @property
     def intermediate_outputs(self) -> list[OutputParam]:
-        return [OutputParam(name="processed_image")]
+        return [OutputParam(name="processed_image", description="Preprocessed image tensor ready for VAE encoding.")]
 
     @torch.no_grad()
-    def __call__(self, components: FluxModularPipeline, state: PipelineState):
-        from ...pipelines.flux.pipeline_flux_kontext import PREFERRED_KONTEXT_RESOLUTIONS
-
+    def __call__(self, components: FluxModularPipeline, state: PipelineState) -> PipelineState:
         block_state = self.get_block_state(state)
         images = block_state.image
 
@@ -210,7 +226,7 @@ class FluxVaeEncoderStep(ModularPipelineBlocks):
 
     def __init__(
         self, input_name: str = "processed_image", output_name: str = "image_latents", sample_mode: str = "sample"
-    ):
+    ) -> None:
         """Initialize a VAE encoder step for converting images to latent representations.
 
         Both the input and output names are configurable so this block can be configured to process to different image
@@ -246,7 +262,13 @@ class FluxVaeEncoderStep(ModularPipelineBlocks):
 
     @property
     def inputs(self) -> list[InputParam]:
-        inputs = [InputParam(self._image_input_name), InputParam("generator")]
+        inputs = [
+            InputParam(
+                self._image_input_name,
+                description=f"Image tensor input used to produce `{self._image_latents_output_name}`.",
+            ),
+            InputParam.template("generator", required=False),
+        ]
         return inputs
 
     @property
@@ -301,10 +323,20 @@ class FluxTextEncoderStep(ModularPipelineBlocks):
     @property
     def inputs(self) -> list[InputParam]:
         return [
-            InputParam("prompt"),
-            InputParam("prompt_2"),
-            InputParam("max_sequence_length", type_hint=int, default=512, required=False),
-            InputParam("joint_attention_kwargs"),
+            InputParam.template("prompt", required=False),
+            InputParam(
+                "prompt_2",
+                type_hint=str | list[str],
+                required=False,
+                description="Optional second prompt or prompts for the T5 text encoder.",
+            ),
+            InputParam.template("max_sequence_length", required=False),
+            InputParam(
+                "joint_attention_kwargs",
+                type_hint=dict[str, Any] | None,
+                required=False,
+                description="Additional kwargs forwarded to the transformer's attention processors.",
+            ),
         ]
 
     @property
@@ -325,13 +357,15 @@ class FluxTextEncoderStep(ModularPipelineBlocks):
         ]
 
     @staticmethod
-    def check_inputs(block_state):
+    def check_inputs(block_state: BlockState) -> None:
         for prompt in [block_state.prompt, block_state.prompt_2]:
             if prompt is not None and (not isinstance(prompt, str) and not isinstance(prompt, list)):
                 raise ValueError(f"`prompt` or `prompt_2` has to be of type `str` or `list` but is {type(prompt)}")
 
     @staticmethod
-    def _get_t5_prompt_embeds(components, prompt: str | list[str], max_sequence_length: int, device: torch.device):
+    def _get_t5_prompt_embeds(
+        components: FluxModularPipeline, prompt: str | list[str], max_sequence_length: int, device: torch.device
+    ) -> torch.Tensor:
         dtype = components.text_encoder_2.dtype
         prompt = [prompt] if isinstance(prompt, str) else prompt
 
@@ -362,7 +396,9 @@ class FluxTextEncoderStep(ModularPipelineBlocks):
         return prompt_embeds
 
     @staticmethod
-    def _get_clip_prompt_embeds(components, prompt: str | list[str], device: torch.device):
+    def _get_clip_prompt_embeds(
+        components: FluxModularPipeline, prompt: str | list[str], device: torch.device
+    ) -> torch.Tensor:
         prompt = [prompt] if isinstance(prompt, str) else prompt
 
         if isinstance(components, TextualInversionLoaderMixin):
@@ -397,15 +433,15 @@ class FluxTextEncoderStep(ModularPipelineBlocks):
 
     @staticmethod
     def encode_prompt(
-        components,
+        components: FluxModularPipeline,
         prompt: str | list[str],
-        prompt_2: str | list[str],
+        prompt_2: str | list[str] | None,
         device: torch.device | None = None,
         prompt_embeds: torch.FloatTensor | None = None,
         pooled_prompt_embeds: torch.FloatTensor | None = None,
         max_sequence_length: int = 512,
         lora_scale: float | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         device = device or components._execution_device
 
         # set lora scale so that monkey patched LoRA
@@ -467,7 +503,7 @@ class FluxTextEncoderStep(ModularPipelineBlocks):
         block_state.prompt_embeds, block_state.pooled_prompt_embeds = self.encode_prompt(
             components,
             prompt=block_state.prompt,
-            prompt_2=None,
+            prompt_2=block_state.prompt_2,
             prompt_embeds=None,
             pooled_prompt_embeds=None,
             device=block_state.device,

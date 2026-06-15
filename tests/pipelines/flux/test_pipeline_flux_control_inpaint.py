@@ -1,7 +1,9 @@
+import gc
 import unittest
 
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
 from PIL import Image
 from transformers import AutoConfig, AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
 
@@ -13,6 +15,9 @@ from diffusers import (
 )
 
 from ...testing_utils import (
+    backend_empty_cache,
+    require_big_accelerator,
+    slow,
     torch_device,
 )
 from ..test_pipelines_common import PipelineTesterMixin, check_qkv_fused_layers_exist
@@ -168,3 +173,57 @@ class FluxControlInpaintPipelineFastTests(unittest.TestCase, PipelineTesterMixin
             image = pipe(**inputs).images[0]
             output_height, output_width, _ = image.shape
             assert (output_height, output_width) == (expected_height, expected_width)
+
+
+@slow
+@require_big_accelerator
+class FluxControlInpaintPipelineSlowTests(unittest.TestCase):
+    pipeline_class = FluxControlInpaintPipeline
+    repo_id = "black-forest-labs/FLUX.1-Canny-dev"
+
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def tearDown(self):
+        super().tearDown()
+        gc.collect()
+        backend_empty_cache(torch_device)
+
+    def get_inputs(self, seed=0):
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        prompt_embeds = torch.load(
+            hf_hub_download(repo_id="diffusers/test-slices", repo_type="dataset", filename="flux/prompt_embeds.pt")
+        ).to(torch_device)
+        pooled_prompt_embeds = torch.load(
+            hf_hub_download(
+                repo_id="diffusers/test-slices", repo_type="dataset", filename="flux/pooled_prompt_embeds.pt"
+            )
+        ).to(torch_device)
+        return {
+            "image": Image.new("RGB", (512, 512), 0),
+            "mask_image": Image.new("L", (512, 512), 255),
+            "control_image": Image.new("RGB", (512, 512), 0),
+            "prompt_embeds": prompt_embeds,
+            "pooled_prompt_embeds": pooled_prompt_embeds,
+            "num_inference_steps": 2,
+            "guidance_scale": 0.0,
+            "max_sequence_length": 256,
+            "height": 512,
+            "width": 512,
+            "strength": 0.5,
+            "output_type": "np",
+            "generator": generator,
+        }
+
+    def test_flux_control_inpaint_inference(self):
+        pipe = self.pipeline_class.from_pretrained(
+            self.repo_id, torch_dtype=torch.bfloat16, text_encoder=None, text_encoder_2=None
+        ).to(torch_device)
+
+        image = pipe(**self.get_inputs()).images[0]
+
+        self.assertEqual(image.shape, (512, 512, 3))
+        self.assertTrue(np.isfinite(image).all())
+        self.assertGreater(float(np.abs(image).sum()), 0.0)
